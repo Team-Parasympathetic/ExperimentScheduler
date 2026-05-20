@@ -95,7 +95,7 @@ export function TimelineRow({
         <ScheduleBlock
           key={block.id}
           block={block}
-          deviceType={row.deviceType}
+          row={row}
           isSelected={selectedBlockId === block.id}
           left={msToPx(block.startMs, zoomPxPerMinute)}
           shadeIndex={blockIndex}

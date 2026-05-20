@@ -32,6 +32,7 @@ import type {
   Block,
   DeviceType,
   ExperimentState,
+  PumpRateMode,
   Row,
   TriggerMode,
 } from "@/types/scheduler";
@@ -77,7 +78,13 @@ interface SchedulerState {
 }
 
 const initialRows: Row[] = [
-  { id: "row-a", name: "Pump 0", deviceType: "peristaltic", hardwareId: 0 },
+  {
+    id: "row-a",
+    name: "Pump 0",
+    deviceType: "peristaltic",
+    hardwareId: 0,
+    pumpRateMode: "variable",
+  },
   { id: "row-b", name: "PWM 0", deviceType: "trigger", hardwareId: null },
 ];
 
@@ -119,6 +126,25 @@ function normalizeFlowRate(flowRate: number) {
   }
 
   return Math.max(0, Number(flowRate.toFixed(2)));
+}
+
+function normalizePumpRateMode(pumpRateMode: PumpRateMode | undefined): PumpRateMode {
+  return pumpRateMode === "fixed" ? "fixed" : "variable";
+}
+
+function normalizeLoadedRows(rows: Row[]): Row[] {
+  return rows.map((row) =>
+    row.deviceType === "peristaltic"
+      ? {
+          ...row,
+          pumpRateMode: normalizePumpRateMode(row.pumpRateMode),
+          isScheduleStatus: false,
+        }
+      : {
+          ...row,
+          pumpRateMode: undefined,
+        },
+  );
 }
 
 function normalizeTimeValue(value: number | undefined, fallback: number, minimum: number) {
@@ -605,7 +631,7 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
       );
 
       return {
-        rows: schedule.rows,
+        rows: normalizeLoadedRows(schedule.rows),
         blocks: schedule.blocks,
         gridSizeMs: Math.max(
           FIRMWARE_SCHEDULE_LIMITS.minEventSpacingMs,
@@ -647,6 +673,7 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
                 : getNextRowName(state.rows, deviceType),
             deviceType,
             hardwareId,
+            pumpRateMode: deviceType === "peristaltic" ? "variable" : undefined,
           },
         ],
       };
@@ -697,6 +724,10 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
         nextDeviceType === "trigger"
           ? patch.isScheduleStatus ?? currentRow?.isScheduleStatus ?? false
           : false;
+      const requestedPumpRateMode =
+        nextDeviceType === "peristaltic"
+          ? normalizePumpRateMode(patch.pumpRateMode ?? currentRow?.pumpRateMode)
+          : undefined;
 
       if (
         currentRow &&
@@ -737,6 +768,7 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
           ...patch,
           deviceType: nextDeviceType ?? row.deviceType,
           hardwareId: requestedHardwareId,
+          pumpRateMode: requestedPumpRateMode,
           nameEdited,
           isScheduleStatus: requestedScheduleStatus,
         };

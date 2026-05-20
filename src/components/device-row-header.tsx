@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { getDeviceTypeLabel } from "@/lib/time";
 import { useSchedulerStore } from "@/store/scheduler-store";
-import type { DeviceType, Row } from "@/types/scheduler";
+import type { DeviceType, PumpRateMode, Row } from "@/types/scheduler";
 
 interface DeviceRowHeaderProps {
   row: Row;
@@ -75,6 +75,25 @@ export function DeviceRowHeader({
           row={row}
           label={row.deviceType === "trigger" ? "Output Pin" : "Pump Index"}
         />
+
+        {row.deviceType === "peristaltic" ? (
+          <div className="space-y-2">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-muted-foreground">
+              Pump Type
+            </div>
+            <Select
+              value={row.pumpRateMode ?? "variable"}
+              onChange={(event) =>
+                updateRow(row.id, {
+                  pumpRateMode: event.target.value as PumpRateMode,
+                })
+              }
+            >
+              <option value="variable">Variable rate</option>
+              <option value="fixed">Fixed rate</option>
+            </Select>
+          </div>
+        ) : null}
 
         {row.deviceType === "trigger" ? (
           <label

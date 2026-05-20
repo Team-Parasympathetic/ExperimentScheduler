@@ -7,7 +7,13 @@ import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { getBlockContext } from "@/lib/schedule";
-import { MIN_BLOCK_DURATION_MS, getDeviceTypeLabel } from "@/lib/time";
+import { MIN_BLOCK_DURATION_MS, getDeviceTypeLabel, getFlowRateLabel } from "@/lib/time";
+import {
+  getFixedPumpCalibrationFit,
+  getFixedPumpFlowRateForDuration,
+  getFixedPumpVolumeForDuration,
+  normalizePumpCalibrationConfig,
+} from "@/lib/pump-calibration";
 import {
   DEFAULT_TRIGGER_DUTY_CYCLE,
   DEFAULT_TRIGGER_FREQUENCY_HZ,
@@ -21,6 +27,7 @@ import {
   normalizeFrequencyHz,
 } from "@/lib/trigger-output";
 import { useSchedulerStore } from "@/store/scheduler-store";
+import { usePumpCalibrationStore } from "@/store/pump-calibration-store";
 import type { TriggerMode } from "@/types/scheduler";
 
 interface BlockContextMenuProps {
@@ -37,6 +44,7 @@ export function BlockContextMenu({ blockId, x, y, onClose }: BlockContextMenuPro
   const gridSizeMs = useSchedulerStore((state) => state.gridSizeMs);
   const updateBlock = useSchedulerStore((state) => state.updateBlock);
   const deleteBlock = useSchedulerStore((state) => state.deleteBlock);
+  const calibrationsByRowId = usePumpCalibrationStore((state) => state.calibrationsByRowId);
 
   const blockContext = getBlockContext(rows, blocks, blockId);
   const block = blockContext?.block ?? null;
@@ -73,6 +81,9 @@ export function BlockContextMenu({ blockId, x, y, onClose }: BlockContextMenuPro
   const menuTop =
     typeof window === "undefined" ? y : Math.max(12, Math.min(y, window.innerHeight - 460));
   const isTriggerBlock = row.deviceType === "trigger";
+  const isFixedRatePump = row.deviceType === "peristaltic" && row.pumpRateMode === "fixed";
+  const fixedCalibration = normalizePumpCalibrationConfig(calibrationsByRowId[row.id]).fixed;
+  const fixedFit = getFixedPumpCalibrationFit(fixedCalibration);
   const triggerMode = block.triggerMode ?? DEFAULT_TRIGGER_MODE;
   const triggerFrequencyHz = normalizeFrequencyHz(
     block.frequencyHz ?? DEFAULT_TRIGGER_FREQUENCY_HZ,
@@ -204,6 +215,39 @@ export function BlockContextMenu({ blockId, x, y, onClose }: BlockContextMenuPro
               </div>
             ) : null}
           </>
+        ) : isFixedRatePump ? (
+          <div className="space-y-3">
+            <div className="space-y-2">
+              <Label htmlFor="menu-direction">Direction</Label>
+              <Select
+                id="menu-direction"
+                value={block.direction}
+                onChange={(event) =>
+                  updateBlock(block.id, {
+                    direction: event.target.value as "forward" | "reverse",
+                  })
+                }
+              >
+                <option value="forward">Forward</option>
+                <option value="reverse">Reverse</option>
+              </Select>
+            </div>
+
+            <div className="rounded-lg border border-orange-100 bg-orange-50/70 px-3 py-2 text-xs text-orange-900">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-orange-700">Total flow</span>
+                <span className="font-mono">
+                  {`${getFixedPumpVolumeForDuration(block.durationMs, fixedFit).toFixed(1)} uL`}
+                </span>
+              </div>
+              <div className="mt-1 flex items-center justify-between gap-3">
+                <span className="text-orange-700">Flow rate</span>
+                <span className="font-mono">
+                  {getFlowRateLabel(getFixedPumpFlowRateForDuration(block.durationMs, fixedFit))}
+                </span>
+              </div>
+            </div>
+          </div>
         ) : (
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="space-y-2">

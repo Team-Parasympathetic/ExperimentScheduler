@@ -23,6 +23,9 @@ import { Select } from "@/components/ui/select";
 import {
   createPumpCalibrationSetFile,
   encodePumpVoltageAsFirmwareFlowRate,
+  getFixedPumpCalibrationFit,
+  getFixedPumpFlowRateForDuration,
+  getFixedPumpVolumeForDuration,
   getCalibrationPointVoltage,
   getPumpCalibrationFit,
   DEFAULT_PUMP_FLOW_UL_PER_MIN_PER_VOLT,
@@ -74,6 +77,10 @@ function getInverseFitLine(fit: ReturnType<typeof getPumpCalibrationFit>) {
   };
 }
 
+function formatFlowRate(value: number) {
+  return `${formatNumber(value, value >= 100 ? 1 : 2)} uL/min`;
+}
+
 function delay(ms: number) {
   return new Promise((resolve) => {
     window.setTimeout(resolve, ms);
@@ -93,6 +100,7 @@ export function PumpCalibrationPanel() {
   const setScheduleMessage = useBoardStore((state) => state.setScheduleMessage);
   const vMax = usePumpCalibrationStore((state) => state.vMax);
   const points = usePumpCalibrationStore((state) => state.points);
+  const fixedPoints = usePumpCalibrationStore((state) => state.fixedPoints);
   const calibrationsByRowId = usePumpCalibrationStore((state) => state.calibrationsByRowId);
   const lastCalibrationFileName = usePumpCalibrationStore(
     (state) => state.lastCalibrationFileName,
@@ -105,6 +113,13 @@ export function PumpCalibrationPanel() {
   const setVMax = usePumpCalibrationStore((state) => state.setVMax);
   const setPointCount = usePumpCalibrationStore((state) => state.setPointCount);
   const setPointMeasuredFlow = usePumpCalibrationStore((state) => state.setPointMeasuredFlow);
+  const setFixedPointCount = usePumpCalibrationStore((state) => state.setFixedPointCount);
+  const setFixedPointDurationMs = usePumpCalibrationStore(
+    (state) => state.setFixedPointDurationMs,
+  );
+  const setFixedPointMeasuredVolume = usePumpCalibrationStore(
+    (state) => state.setFixedPointMeasuredVolume,
+  );
   const setRunRowId = usePumpCalibrationStore((state) => state.setRunRowId);
   const setRunDurationMs = usePumpCalibrationStore((state) => state.setRunDurationMs);
   const setRunVoltage = usePumpCalibrationStore((state) => state.setRunVoltage);
@@ -125,8 +140,14 @@ export function PumpCalibrationPanel() {
     runRowId && peristalticRows.some((row) => row.id === runRowId)
       ? runRowId
       : peristalticRows[0]?.id ?? "";
+  const selectedRunRow = peristalticRows.find((row) => row.id === selectedRunRowId) ?? null;
+  const selectedPumpRateMode = selectedRunRow?.pumpRateMode === "fixed" ? "fixed" : "variable";
+  const isFixedRatePump = selectedPumpRateMode === "fixed";
   const fit = getPumpCalibrationFit({ vMax, points });
+  const fixedFit = getFixedPumpCalibrationFit({ points: fixedPoints });
   const inverseFit = getInverseFitLine(fit);
+  const activeFitIsValid = isFixedRatePump ? fixedFit.isValid : fit.isValid;
+  const activeFitPointCount = isFixedRatePump ? fixedFit.pointCount : fit.pointCount;
   const isMainScheduleRunning = experimentState === "running";
   const isBoardBusy = scheduleCommandState !== null || isCalibrationRunning || isMainScheduleRunning;
   const canRunCalibration = selectedRunRowId !== "" && !isBoardBusy;
@@ -233,14 +254,18 @@ export function PumpCalibrationPanel() {
       startMs: 0,
       durationMs: runDurationMs,
       direction: runDirection,
-      flowRate: encodePumpVoltageAsFirmwareFlowRate(runVoltage, vMax),
+      flowRate: isFixedRatePump
+        ? encodePumpVoltageAsFirmwareFlowRate(MAX_PUMP_VOLTAGE)
+        : encodePumpVoltageAsFirmwareFlowRate(runVoltage, vMax),
     };
 
     calibrationRunIdRef.current = runId;
     setCalibrationRunning(true);
     setScheduleCommandState("upload");
     setStatusMessage(
-      `Uploading ${selectedRow.name} calibration pulse at ${formatVoltage(runVoltage)}.`,
+      isFixedRatePump
+        ? `Uploading ${selectedRow.name} fixed-rate calibration pulse.`
+        : `Uploading ${selectedRow.name} calibration pulse at ${formatVoltage(runVoltage)}.`,
     );
     setScheduleMessage(`Calibration upload in progress on ${trimmedComPort || "COM port"}...`);
 
@@ -282,6 +307,7 @@ export function PumpCalibrationPanel() {
       setScheduleMessage(startResult.ok ? startResult.message : `Failed: ${startResult.message}`);
 
       if (startResult.ok) {
+        setScheduleCommandState(null);
         await delay(runDurationMs);
 
         if (runId === calibrationRunIdRef.current) {
@@ -339,12 +365,16 @@ export function PumpCalibrationPanel() {
           </div>
           <Badge
             className={
-              fit.isValid
+              activeFitIsValid
                 ? "border-emerald-200 bg-emerald-50 text-emerald-700"
                 : "border-slate-200 bg-slate-50 text-slate-600"
             }
           >
-            {fit.isValid ? "Fit Active" : `${fit.pointCount}/${MIN_CALIBRATION_POINTS} Points`}
+            {activeFitIsValid
+              ? isFixedRatePump
+                ? "Fixed Fit Active"
+                : "Fit Active"
+              : `${activeFitPointCount}/${MIN_CALIBRATION_POINTS} Points`}
           </Badge>
         </div>
 
@@ -442,7 +472,7 @@ export function PumpCalibrationPanel() {
                 </Select>
               </div>
 
-              <div className="grid gap-3 sm:grid-cols-2">
+              <div className={cn("grid gap-3", !isFixedRatePump && "sm:grid-cols-2")}>
                 <div className="space-y-2">
                   <Label htmlFor="calibration-duration">Duration</Label>
                   <div className="relative">
@@ -462,27 +492,29 @@ export function PumpCalibrationPanel() {
                   </div>
                 </div>
 
-                <div className="space-y-2">
-                  <Label htmlFor="calibration-voltage">Voltage</Label>
-                  <div className="relative">
-                    <DraftNumberInput
-                      id="calibration-voltage"
-                      className="pr-10"
-                      disabled={isMainScheduleRunning}
-                      max={vMax}
-                      maxValue={vMax}
-                      min={0}
-                      minValue={0}
-                      step={0.05}
-                      type="number"
-                      value={runVoltage}
-                      onCommit={setRunVoltage}
-                    />
-                    <span className="pointer-events-none absolute right-8 top-1/2 -translate-y-1/2 text-xs uppercase tracking-[0.18em] text-muted-foreground">
-                      V
-                    </span>
+                {!isFixedRatePump ? (
+                  <div className="space-y-2">
+                    <Label htmlFor="calibration-voltage">Voltage</Label>
+                    <div className="relative">
+                      <DraftNumberInput
+                        id="calibration-voltage"
+                        className="pr-10"
+                        disabled={isMainScheduleRunning}
+                        max={vMax}
+                        maxValue={vMax}
+                        min={0}
+                        minValue={0}
+                        step={0.05}
+                        type="number"
+                        value={runVoltage}
+                        onCommit={setRunVoltage}
+                      />
+                      <span className="pointer-events-none absolute right-8 top-1/2 -translate-y-1/2 text-xs uppercase tracking-[0.18em] text-muted-foreground">
+                        V
+                      </span>
+                    </div>
                   </div>
-                </div>
+                ) : null}
               </div>
 
               <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr),auto,auto]">
@@ -555,82 +587,153 @@ export function PumpCalibrationPanel() {
               Calibration Table
             </div>
 
-            <div className="mt-3 grid gap-3 sm:grid-cols-2">
-              <div className="space-y-2">
-                <Label htmlFor="calibration-vmax">V_MAX</Label>
-                <div className="relative">
+            {isFixedRatePump ? (
+              <>
+                <div className="mt-3 max-w-[180px] space-y-2">
+                  <Label htmlFor="fixed-calibration-point-count">Points</Label>
                   <DraftNumberInput
-                    className="pr-10"
-                    id="calibration-vmax"
-                    max={MAX_PUMP_VOLTAGE}
-                    maxValue={MAX_PUMP_VOLTAGE}
-                    min={0}
-                    minValue={Number.EPSILON}
-                    step={0.05}
+                    id="fixed-calibration-point-count"
+                    min={MIN_CALIBRATION_POINTS}
+                    minValue={MIN_CALIBRATION_POINTS}
+                    step={1}
                     type="number"
-                    value={vMax}
-                    onCommit={setVMax}
+                    value={fixedPoints.length}
+                    onCommit={setFixedPointCount}
                   />
-                  <span className="pointer-events-none absolute right-8 top-1/2 -translate-y-1/2 text-xs uppercase tracking-[0.18em] text-muted-foreground">
-                    V
-                  </span>
                 </div>
-              </div>
 
-              <div className="space-y-2">
-                <Label htmlFor="calibration-point-count">Points</Label>
-                <DraftNumberInput
-                  id="calibration-point-count"
-                  min={MIN_CALIBRATION_POINTS}
-                  minValue={MIN_CALIBRATION_POINTS}
-                  step={1}
-                  type="number"
-                  value={points.length}
-                  onCommit={setPointCount}
-                />
-              </div>
-            </div>
-
-            <div className="mt-4 overflow-hidden rounded-lg border border-border/60">
-              <div className="grid grid-cols-[52px,minmax(72px,0.8fr),minmax(120px,1.2fr)] bg-slate-50/90 px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                <div>Point</div>
-                <div>Voltage</div>
-                <div>Measured Flow</div>
-              </div>
-              <div className="divide-y divide-border/60">
-                {points.map((point, index) => {
-                  const voltage = getCalibrationPointVoltage(index, points.length, vMax);
-
-                  return (
-                    <div
-                      key={point.id}
-                      className="grid grid-cols-[52px,minmax(72px,0.8fr),minmax(120px,1.2fr)] items-center gap-2 px-3 py-2"
-                    >
-                      <div className="text-xs font-semibold text-muted-foreground">
-                        {index + 1}
+                <div className="mt-4 overflow-hidden rounded-lg border border-border/60">
+                  <div className="grid grid-cols-[52px,minmax(96px,0.9fr),minmax(124px,1.1fr)] bg-slate-50/90 px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                    <div>Point</div>
+                    <div>Duration</div>
+                    <div>Measured Volume</div>
+                  </div>
+                  <div className="divide-y divide-border/60">
+                    {fixedPoints.map((point, index) => (
+                      <div
+                        key={point.id}
+                        className="grid grid-cols-[52px,minmax(96px,0.9fr),minmax(124px,1.1fr)] items-center gap-2 px-3 py-2"
+                      >
+                        <div className="text-xs font-semibold text-muted-foreground">
+                          {index + 1}
+                        </div>
+                        <div className="relative">
+                          <DraftNumberInput
+                            className="h-8 pr-8 text-xs"
+                            min={0.5}
+                            minValue={0.5}
+                            step={0.5}
+                            type="number"
+                            value={point.durationMs / 1_000}
+                            onCommit={(value) =>
+                              setFixedPointDurationMs(point.id, value * 1_000)
+                            }
+                          />
+                          <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+                            s
+                          </span>
+                        </div>
+                        <div className="relative">
+                          <NullableDraftNumberInput
+                            className="h-8 pr-10 text-xs"
+                            min={0}
+                            minValue={0}
+                            step={1}
+                            type="number"
+                            value={point.measuredVolumeUl}
+                            onCommit={(value) =>
+                              setFixedPointMeasuredVolume(point.id, value)
+                            }
+                          />
+                          <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+                            uL
+                          </span>
+                        </div>
                       </div>
-                      <div className="font-mono text-xs text-foreground">
-                        {formatNumber(voltage, 3)}
-                      </div>
-                      <div className="relative">
-                        <NullableDraftNumberInput
-                          className="h-8 pr-16 text-xs"
-                          min={0}
-                          minValue={0}
-                          step={1}
-                          type="number"
-                          value={point.measuredFlowRate}
-                          onCommit={(value) => setPointMeasuredFlow(point.id, value)}
-                        />
-                        <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
-                          uL/min
-                        </span>
-                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label htmlFor="calibration-vmax">V_MAX</Label>
+                    <div className="relative">
+                      <DraftNumberInput
+                        className="pr-10"
+                        id="calibration-vmax"
+                        max={MAX_PUMP_VOLTAGE}
+                        maxValue={MAX_PUMP_VOLTAGE}
+                        min={0}
+                        minValue={Number.EPSILON}
+                        step={0.05}
+                        type="number"
+                        value={vMax}
+                        onCommit={setVMax}
+                      />
+                      <span className="pointer-events-none absolute right-8 top-1/2 -translate-y-1/2 text-xs uppercase tracking-[0.18em] text-muted-foreground">
+                        V
+                      </span>
                     </div>
-                  );
-                })}
-              </div>
-            </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="calibration-point-count">Points</Label>
+                    <DraftNumberInput
+                      id="calibration-point-count"
+                      min={MIN_CALIBRATION_POINTS}
+                      minValue={MIN_CALIBRATION_POINTS}
+                      step={1}
+                      type="number"
+                      value={points.length}
+                      onCommit={setPointCount}
+                    />
+                  </div>
+                </div>
+
+                <div className="mt-4 overflow-hidden rounded-lg border border-border/60">
+                  <div className="grid grid-cols-[52px,minmax(72px,0.8fr),minmax(120px,1.2fr)] bg-slate-50/90 px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                    <div>Point</div>
+                    <div>Voltage</div>
+                    <div>Measured Flow</div>
+                  </div>
+                  <div className="divide-y divide-border/60">
+                    {points.map((point, index) => {
+                      const voltage = getCalibrationPointVoltage(index, points.length, vMax);
+
+                      return (
+                        <div
+                          key={point.id}
+                          className="grid grid-cols-[52px,minmax(72px,0.8fr),minmax(120px,1.2fr)] items-center gap-2 px-3 py-2"
+                        >
+                          <div className="text-xs font-semibold text-muted-foreground">
+                            {index + 1}
+                          </div>
+                          <div className="font-mono text-xs text-foreground">
+                            {formatNumber(voltage, 3)}
+                          </div>
+                          <div className="relative">
+                            <NullableDraftNumberInput
+                              className="h-8 pr-16 text-xs"
+                              min={0}
+                              minValue={0}
+                              step={1}
+                              type="number"
+                              value={point.measuredFlowRate}
+                              onCommit={(value) => setPointMeasuredFlow(point.id, value)}
+                            />
+                            <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+                              uL/min
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </>
+            )}
           </section>
 
           <section className="rounded-lg border border-border/60 bg-slate-50/80 p-4">
@@ -643,23 +746,39 @@ export function PumpCalibrationPanel() {
               <div className="flex items-center justify-between gap-3 rounded-lg border border-border/60 bg-white/72 px-3 py-2">
                 <span className="text-muted-foreground">Slope</span>
                 <span className="font-mono text-foreground">
-                  {`${formatNumber(inverseFit.slopeVoltagePerFlow, 6)} V/(uL/min)`}
+                  {isFixedRatePump
+                    ? `${formatNumber(fixedFit.slopeVolumeUlPerSecond, 4)} uL/s`
+                    : `${formatNumber(inverseFit.slopeVoltagePerFlow, 6)} V/(uL/min)`}
                 </span>
               </div>
               <div className="flex items-center justify-between gap-3 rounded-lg border border-border/60 bg-white/72 px-3 py-2">
                 <span className="text-muted-foreground">Intercept</span>
                 <span className="font-mono text-foreground">
-                  {`${formatNumber(inverseFit.interceptVoltage, 4)} V`}
+                  {isFixedRatePump
+                    ? `${formatNumber(fixedFit.interceptVolumeUl, 3)} uL`
+                    : `${formatNumber(inverseFit.interceptVoltage, 4)} V`}
                 </span>
               </div>
               <div className="flex items-center justify-between gap-3 rounded-lg border border-border/60 bg-white/72 px-3 py-2">
                 <span className="text-muted-foreground">R2</span>
                 <span className="font-mono text-foreground">
-                  {fit.rSquared === null ? "--" : formatNumber(fit.rSquared, 4)}
+                  {(isFixedRatePump ? fixedFit.rSquared : fit.rSquared) === null
+                    ? "--"
+                    : formatNumber((isFixedRatePump ? fixedFit.rSquared : fit.rSquared) ?? 0, 4)}
                 </span>
               </div>
+              {isFixedRatePump ? (
+                <div className="flex items-center justify-between gap-3 rounded-lg border border-border/60 bg-white/72 px-3 py-2">
+                  <span className="text-muted-foreground">At Run Duration</span>
+                  <span className="font-mono text-foreground">
+                    {`${formatNumber(getFixedPumpVolumeForDuration(runDurationMs, fixedFit), 2)} uL, ${formatFlowRate(getFixedPumpFlowRateForDuration(runDurationMs, fixedFit))}`}
+                  </span>
+                </div>
+              ) : null}
               <div className="rounded-lg border border-border/60 bg-white/72 px-3 py-2 font-mono text-xs text-foreground">
-                {`V = ${formatNumber(inverseFit.slopeVoltagePerFlow, 6)} * flow + ${formatNumber(inverseFit.interceptVoltage, 4)}`}
+                {isFixedRatePump
+                  ? `volume = ${formatNumber(fixedFit.slopeVolumeUlPerSecond, 4)} * seconds + ${formatNumber(fixedFit.interceptVolumeUl, 3)}`
+                  : `V = ${formatNumber(inverseFit.slopeVoltagePerFlow, 6)} * flow + ${formatNumber(inverseFit.interceptVoltage, 4)}`}
               </div>
             </div>
           </section>

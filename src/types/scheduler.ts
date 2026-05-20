@@ -1,6 +1,7 @@
 export type DeviceType = "peristaltic" | "trigger";
 export type Direction = "forward" | "reverse";
 export type ExperimentState = "idle" | "running";
+export type PumpRateMode = "variable" | "fixed";
 export type TriggerMode = "rising" | "falling" | "waveform";
 
 export interface Row {
@@ -8,6 +9,7 @@ export interface Row {
   name: string;
   deviceType: DeviceType;
   hardwareId?: number | null;
+  pumpRateMode?: PumpRateMode;
   nameEdited?: boolean;
   isScheduleStatus?: boolean;
 }

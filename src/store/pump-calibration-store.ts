@@ -1,11 +1,16 @@
 import { create } from "zustand";
 import {
   DEFAULT_CALIBRATION_DURATION_MS,
+  createFixedCalibrationPoints,
   createDefaultPumpCalibrationConfig,
   normalizeCalibrationPointCount,
+  normalizeFixedPumpCalibrationConfig,
+  normalizeFixedPumpDurationMs,
   normalizePumpCalibrationConfig,
   normalizePumpVMax,
   normalizePumpVoltage,
+  normalizeVariablePumpCalibrationConfig,
+  type FixedPumpCalibrationPoint,
   type PumpCalibrationConfigByRowId,
   type PumpCalibrationSetFile,
   type PumpCalibrationPoint,
@@ -15,6 +20,7 @@ import type { Direction } from "@/types/scheduler";
 interface PumpCalibrationState {
   vMax: number;
   points: PumpCalibrationPoint[];
+  fixedPoints: FixedPumpCalibrationPoint[];
   calibrationsByRowId: PumpCalibrationConfigByRowId;
   lastCalibrationFileName: string;
   runRowId: string | null;
@@ -25,6 +31,9 @@ interface PumpCalibrationState {
   setVMax: (vMax: number) => void;
   setPointCount: (pointCount: number) => void;
   setPointMeasuredFlow: (pointId: string, measuredFlowRate: number | null) => void;
+  setFixedPointCount: (pointCount: number) => void;
+  setFixedPointDurationMs: (pointId: string, durationMs: number) => void;
+  setFixedPointMeasuredVolume: (pointId: string, measuredVolumeUl: number | null) => void;
   setRunRowId: (rowId: string | null) => void;
   setRunDurationMs: (durationMs: number) => void;
   setRunVoltage: (voltage: number) => void;
@@ -35,6 +44,14 @@ interface PumpCalibrationState {
 }
 
 function normalizeMeasuredFlowRate(value: number | null) {
+  if (value === null || !Number.isFinite(value)) {
+    return null;
+  }
+
+  return Math.max(0, Number(value.toFixed(3)));
+}
+
+function normalizeMeasuredVolume(value: number | null) {
   if (value === null || !Number.isFinite(value)) {
     return null;
   }
@@ -56,8 +73,9 @@ function withActiveCalibration(
   calibration: ReturnType<typeof normalizePumpCalibrationConfig>,
 ) {
   return {
-    vMax: calibration.vMax,
-    points: calibration.points,
+    vMax: calibration.variable.vMax,
+    points: calibration.variable.points,
+    fixedPoints: calibration.fixed.points,
     calibrationsByRowId: state.runRowId
       ? {
           ...state.calibrationsByRowId,
@@ -70,8 +88,9 @@ function withActiveCalibration(
 const defaultCalibration = createDefaultPumpCalibrationConfig();
 
 export const usePumpCalibrationStore = create<PumpCalibrationState>((set) => ({
-  vMax: defaultCalibration.vMax,
-  points: defaultCalibration.points,
+  vMax: defaultCalibration.variable.vMax,
+  points: defaultCalibration.variable.points,
+  fixedPoints: defaultCalibration.fixed.points,
   calibrationsByRowId: {},
   lastCalibrationFileName: "",
   runRowId: null,
@@ -82,9 +101,14 @@ export const usePumpCalibrationStore = create<PumpCalibrationState>((set) => ({
   setVMax: (vMax) =>
     set((state) => {
       const nextVMax = normalizePumpVMax(vMax);
-      const calibration = normalizePumpCalibrationConfig({
+      const variable = normalizeVariablePumpCalibrationConfig({
         vMax: nextVMax,
         points: state.points,
+      });
+      const calibration = normalizePumpCalibrationConfig({
+        ...(state.runRowId ? state.calibrationsByRowId[state.runRowId] : undefined),
+        variable,
+        fixed: { points: state.fixedPoints },
       });
 
       return {
@@ -104,9 +128,14 @@ export const usePumpCalibrationStore = create<PumpCalibrationState>((set) => ({
         );
       });
 
-      const calibration = normalizePumpCalibrationConfig({
+      const variable = normalizeVariablePumpCalibrationConfig({
         vMax: state.vMax,
         points: nextPoints,
+      });
+      const calibration = normalizePumpCalibrationConfig({
+        ...(state.runRowId ? state.calibrationsByRowId[state.runRowId] : undefined),
+        variable,
+        fixed: { points: state.fixedPoints },
       });
 
       return withActiveCalibration(state, calibration);
@@ -121,9 +150,68 @@ export const usePumpCalibrationStore = create<PumpCalibrationState>((set) => ({
             }
           : point,
       );
-      const calibration = normalizePumpCalibrationConfig({
+      const variable = normalizeVariablePumpCalibrationConfig({
         vMax: state.vMax,
         points: nextPoints,
+      });
+      const calibration = normalizePumpCalibrationConfig({
+        ...(state.runRowId ? state.calibrationsByRowId[state.runRowId] : undefined),
+        variable,
+        fixed: { points: state.fixedPoints },
+      });
+
+      return withActiveCalibration(state, calibration);
+    }),
+  setFixedPointCount: (pointCount) =>
+    set((state) => {
+      const nextPointCount = normalizeCalibrationPointCount(pointCount);
+      const defaultPoints = createFixedCalibrationPoints(nextPointCount);
+      const nextPoints = Array.from({ length: nextPointCount }, (_, index) => {
+        return state.fixedPoints[index] ?? defaultPoints[index];
+      });
+      const fixed = normalizeFixedPumpCalibrationConfig({ points: nextPoints });
+      const calibration = normalizePumpCalibrationConfig({
+        ...(state.runRowId ? state.calibrationsByRowId[state.runRowId] : undefined),
+        variable: { vMax: state.vMax, points: state.points },
+        fixed,
+      });
+
+      return withActiveCalibration(state, calibration);
+    }),
+  setFixedPointDurationMs: (pointId, durationMs) =>
+    set((state) => {
+      const nextPoints = state.fixedPoints.map((point) =>
+        point.id === pointId
+          ? {
+              ...point,
+              durationMs: normalizeFixedPumpDurationMs(durationMs),
+            }
+          : point,
+      );
+      const fixed = normalizeFixedPumpCalibrationConfig({ points: nextPoints });
+      const calibration = normalizePumpCalibrationConfig({
+        ...(state.runRowId ? state.calibrationsByRowId[state.runRowId] : undefined),
+        variable: { vMax: state.vMax, points: state.points },
+        fixed,
+      });
+
+      return withActiveCalibration(state, calibration);
+    }),
+  setFixedPointMeasuredVolume: (pointId, measuredVolumeUl) =>
+    set((state) => {
+      const nextPoints = state.fixedPoints.map((point) =>
+        point.id === pointId
+          ? {
+              ...point,
+              measuredVolumeUl: normalizeMeasuredVolume(measuredVolumeUl),
+            }
+          : point,
+      );
+      const fixed = normalizeFixedPumpCalibrationConfig({ points: nextPoints });
+      const calibration = normalizePumpCalibrationConfig({
+        ...(state.runRowId ? state.calibrationsByRowId[state.runRowId] : undefined),
+        variable: { vMax: state.vMax, points: state.points },
+        fixed,
       });
 
       return withActiveCalibration(state, calibration);
@@ -134,15 +222,16 @@ export const usePumpCalibrationStore = create<PumpCalibrationState>((set) => ({
 
       return {
         runRowId,
-        vMax: calibration.vMax,
-        points: calibration.points,
+        vMax: calibration.variable.vMax,
+        points: calibration.variable.points,
+        fixedPoints: calibration.fixed.points,
         calibrationsByRowId: runRowId
           ? {
               ...state.calibrationsByRowId,
               [runRowId]: calibration,
             }
           : state.calibrationsByRowId,
-        runVoltage: normalizePumpVoltage(state.runVoltage, calibration.vMax),
+        runVoltage: normalizePumpVoltage(state.runVoltage, calibration.variable.vMax),
       };
     }),
   setRunDurationMs: (runDurationMs) =>
@@ -175,9 +264,10 @@ export const usePumpCalibrationStore = create<PumpCalibrationState>((set) => ({
       return {
         calibrationsByRowId,
         runRowId: nextRunRowId,
-        vMax: activeCalibration.vMax,
-        points: activeCalibration.points,
-        runVoltage: normalizePumpVoltage(state.runVoltage, activeCalibration.vMax),
+        vMax: activeCalibration.variable.vMax,
+        points: activeCalibration.variable.points,
+        fixedPoints: activeCalibration.fixed.points,
+        runVoltage: normalizePumpVoltage(state.runVoltage, activeCalibration.variable.vMax),
         lastCalibrationFileName: fileName || state.lastCalibrationFileName,
         statusMessage: fileName ? `Loaded calibration file ${fileName}.` : state.statusMessage,
       };

@@ -2,7 +2,13 @@ import type {
   MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
 } from "react";
-import type { Block, DeviceType, TriggerMode } from "@/types/scheduler";
+import type { Block, Row, TriggerMode } from "@/types/scheduler";
+import {
+  getFixedPumpCalibrationFit,
+  getFixedPumpFlowRateForDuration,
+  getFixedPumpVolumeForDuration,
+  normalizePumpCalibrationConfig,
+} from "@/lib/pump-calibration";
 import {
   DEFAULT_TRIGGER_MODE,
   getTriggerFrequencyLabel,
@@ -10,11 +16,12 @@ import {
   normalizeDutyCycle,
 } from "@/lib/trigger-output";
 import { formatDuration, getDeviceTypeLabel, getFlowRateLabel } from "@/lib/time";
+import { usePumpCalibrationStore } from "@/store/pump-calibration-store";
 import { cn } from "@/lib/utils";
 
 interface ScheduleBlockProps {
   block: Block;
-  deviceType: DeviceType;
+  row: Row;
   left: number;
   width: number;
   shadeIndex: number;
@@ -54,9 +61,16 @@ function TriggerGlyph({ mode }: { mode: TriggerMode }) {
   );
 }
 
+function formatNumber(value: number, digits = 1) {
+  return value.toLocaleString(undefined, {
+    maximumFractionDigits: digits,
+    minimumFractionDigits: value % 1 === 0 ? 0 : Math.min(1, digits),
+  });
+}
+
 export function ScheduleBlock({
   block,
-  deviceType,
+  row,
   isSelected,
   left,
   onContextMenu,
@@ -67,7 +81,13 @@ export function ScheduleBlock({
   shadeIndex,
   width,
 }: ScheduleBlockProps) {
+  const calibration = usePumpCalibrationStore((state) =>
+    normalizePumpCalibrationConfig(state.calibrationsByRowId[block.rowId]),
+  );
+  const fixedFit = getFixedPumpCalibrationFit(calibration.fixed);
+  const deviceType = row.deviceType;
   const isTrigger = deviceType === "trigger";
+  const isFixedRatePump = deviceType === "peristaltic" && row.pumpRateMode === "fixed";
   const showContent = width >= 132;
   const isAlternateShade = shadeIndex % 2 === 1;
   const triggerMode = block.triggerMode ?? DEFAULT_TRIGGER_MODE;
@@ -85,6 +105,10 @@ export function ScheduleBlock({
       ? triggerMode === "rising"
         ? "High at start"
         : "Low at start"
+      : isFixedRatePump
+      ? `${formatNumber(getFixedPumpVolumeForDuration(block.durationMs, fixedFit), 1)} uL @ ${getFlowRateLabel(
+          getFixedPumpFlowRateForDuration(block.durationMs, fixedFit),
+        )}`
       : getFlowRateLabel(block.flowRate);
 
   return (
