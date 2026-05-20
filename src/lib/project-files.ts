@@ -42,6 +42,13 @@ export function saveProjectJsonFile({
   });
 }
 
+export function deleteProjectJsonFile(folder: ProjectDataFolder, fileName: string) {
+  return invoke<string>("delete_data_file", {
+    folder,
+    fileName,
+  });
+}
+
 export async function loadProjectJsonFile<T>(folder: ProjectDataFolder, fileName: string) {
   const content = await invoke<string>("load_data_file", { folder, fileName });
   return JSON.parse(content) as T;

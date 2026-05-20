@@ -6,6 +6,7 @@ import {
   RefreshCw,
   Save,
   Square,
+  Trash2,
   Upload,
   ZoomIn,
   ZoomOut,
@@ -36,6 +37,7 @@ import {
 } from "@/lib/pump-calibration";
 import {
   getDefaultJsonFileName,
+  deleteProjectJsonFile,
   listProjectJsonFiles,
   loadProjectJsonFile,
   saveProjectJsonFile,
@@ -123,6 +125,7 @@ export function TopToolbar({
   );
   const [scheduleFiles, setScheduleFiles] = useState<string[]>([]);
   const [selectedScheduleFile, setSelectedScheduleFile] = useState("");
+  const [scheduleFilePendingDelete, setScheduleFilePendingDelete] = useState("");
   const [scheduleFileMessage, setScheduleFileMessage] = useState("");
   const firmwareSummary = getFirmwareScheduleSummary(blocks, rows);
   const selectedChannelCount = rows.filter((row) => row.deviceType === newChannelType).length;
@@ -233,6 +236,7 @@ export function TopToolbar({
       setLastCalibrationFileName(savedCalibrationFileName);
       setScheduleFileName(savedFileName);
       setSelectedScheduleFile(savedFileName);
+      setScheduleFilePendingDelete("");
       setScheduleFileMessage(`Saved ${savedFileName} with ${savedCalibrationFileName}.`);
       await refreshScheduleFiles();
     } catch (error) {
@@ -264,6 +268,7 @@ export function TopToolbar({
         experimentDurationMs: scheduleFile.experimentDurationMs,
       });
       setScheduleFileName(selectedScheduleFile);
+      setScheduleFilePendingDelete("");
 
       if (scheduleFile.lastCalibrationFileName) {
         try {
@@ -285,6 +290,28 @@ export function TopToolbar({
       } else {
         setScheduleFileMessage(`Loaded ${selectedScheduleFile}.`);
       }
+    } catch (error) {
+      setScheduleFileMessage(`Failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
+  const deleteScheduleFile = async (fileToDelete: string) => {
+    if (!fileToDelete) {
+      setScheduleFileMessage("Select a schedule file first.");
+      return;
+    }
+
+    try {
+      const deletedFileName = await deleteProjectJsonFile("schedules", fileToDelete);
+      const files = await listProjectJsonFiles("schedules");
+      const nextSelectedFile =
+        files.find((fileName) => fileName !== deletedFileName) ?? files[0] ?? "";
+
+      setScheduleFiles(files);
+      setSelectedScheduleFile(nextSelectedFile);
+      setScheduleFileName(nextSelectedFile || getDefaultJsonFileName("schedule"));
+      setScheduleFilePendingDelete("");
+      setScheduleFileMessage(`Deleted ${deletedFileName}.`);
     } catch (error) {
       setScheduleFileMessage(`Failed: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -494,22 +521,58 @@ export function TopToolbar({
                 value={scheduleFileName}
                 onChange={(event) => setScheduleFileName(event.target.value)}
               />
-              <Select
-                value={selectedScheduleFile}
-                onChange={(event) => {
-                  setSelectedScheduleFile(event.target.value);
-                  if (event.target.value) {
-                    setScheduleFileName(event.target.value);
-                  }
-                }}
-              >
-                <option value="">No saved schedules</option>
-                {scheduleFiles.map((fileName) => (
-                  <option key={fileName} value={fileName}>
-                    {fileName}
-                  </option>
-                ))}
-              </Select>
+              <div className="grid grid-cols-[minmax(0,1fr),auto] gap-2">
+                <Select
+                  value={selectedScheduleFile}
+                  onChange={(event) => {
+                    setSelectedScheduleFile(event.target.value);
+                    setScheduleFilePendingDelete("");
+                    if (event.target.value) {
+                      setScheduleFileName(event.target.value);
+                    }
+                  }}
+                >
+                  <option value="">No saved schedules</option>
+                  {scheduleFiles.map((fileName) => (
+                    <option key={fileName} value={fileName}>
+                      {fileName}
+                    </option>
+                  ))}
+                </Select>
+                <Button
+                  aria-label="Delete selected schedule"
+                  disabled={!selectedScheduleFile}
+                  size="icon"
+                  title="Delete selected schedule"
+                  variant="outline"
+                  onClick={() => setScheduleFilePendingDelete(selectedScheduleFile)}
+                >
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </div>
+              {scheduleFilePendingDelete ? (
+                <div className="grid grid-cols-[minmax(0,1fr),auto,auto] items-center gap-2 rounded-lg border border-rose-200 bg-rose-50 px-2 py-2 text-[11px] text-rose-700">
+                  <div className="truncate" title={scheduleFilePendingDelete}>
+                    Delete {scheduleFilePendingDelete}?
+                  </div>
+                  <Button
+                    className="h-7 px-2 text-[11px]"
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setScheduleFilePendingDelete("")}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    className="h-7 px-2 text-[11px]"
+                    size="sm"
+                    variant="destructive"
+                    onClick={() => void deleteScheduleFile(scheduleFilePendingDelete)}
+                  >
+                    Delete
+                  </Button>
+                </div>
+              ) : null}
               <div className="grid grid-cols-2 gap-2">
                 <Button size="sm" variant="outline" onClick={saveScheduleFile}>
                   <Save className="h-4 w-4" />

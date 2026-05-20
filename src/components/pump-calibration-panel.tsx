@@ -7,6 +7,7 @@ import {
   Save,
   Square,
   Table2,
+  Trash2,
   TrendingUp,
   Upload,
 } from "lucide-react";
@@ -35,6 +36,7 @@ import {
 } from "@/lib/pump-calibration";
 import {
   getDefaultJsonFileName,
+  deleteProjectJsonFile,
   listProjectJsonFiles,
   loadProjectJsonFile,
   saveProjectJsonFile,
@@ -134,6 +136,7 @@ export function PumpCalibrationPanel() {
   );
   const [calibrationFiles, setCalibrationFiles] = useState<string[]>([]);
   const [selectedCalibrationFile, setSelectedCalibrationFile] = useState("");
+  const [calibrationFilePendingDelete, setCalibrationFilePendingDelete] = useState("");
   const [fileMessage, setFileMessage] = useState("");
   const peristalticRows = rows.filter((row) => row.deviceType === "peristaltic");
   const selectedRunRowId =
@@ -202,6 +205,7 @@ export function PumpCalibrationPanel() {
       setCalibrationFileName(savedFileName);
       setSelectedCalibrationFile(savedFileName);
       setLastCalibrationFileName(savedFileName);
+      setCalibrationFilePendingDelete("");
       setFileMessage(`Saved ${savedFileName}.`);
       await refreshCalibrationFiles();
     } catch (error) {
@@ -227,7 +231,35 @@ export function PumpCalibrationPanel() {
 
       importCalibrationSet(calibrationFile, selectedCalibrationFile);
       setCalibrationFileName(selectedCalibrationFile);
+      setCalibrationFilePendingDelete("");
       setFileMessage(`Loaded ${selectedCalibrationFile}.`);
+    } catch (error) {
+      setFileMessage(`Failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
+  const deleteCalibrationFile = async (fileToDelete: string) => {
+    if (!fileToDelete) {
+      setFileMessage("Select a calibration file first.");
+      return;
+    }
+
+    try {
+      const deletedFileName = await deleteProjectJsonFile("calibrations", fileToDelete);
+      const files = await listProjectJsonFiles("calibrations");
+      const nextSelectedFile =
+        files.find((fileName) => fileName !== deletedFileName) ?? files[0] ?? "";
+
+      setCalibrationFiles(files);
+      setSelectedCalibrationFile(nextSelectedFile);
+      setCalibrationFileName(nextSelectedFile || getDefaultJsonFileName("calibration"));
+      setCalibrationFilePendingDelete("");
+
+      if (lastCalibrationFileName === deletedFileName) {
+        setLastCalibrationFileName("");
+      }
+
+      setFileMessage(`Deleted ${deletedFileName}.`);
     } catch (error) {
       setFileMessage(`Failed: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -401,22 +433,58 @@ export function PumpCalibrationPanel() {
                 value={calibrationFileName}
                 onChange={(event) => setCalibrationFileName(event.target.value)}
               />
-              <Select
-                value={selectedCalibrationFile}
-                onChange={(event) => {
-                  setSelectedCalibrationFile(event.target.value);
-                  if (event.target.value) {
-                    setCalibrationFileName(event.target.value);
-                  }
-                }}
-              >
-                <option value="">No saved calibrations</option>
-                {calibrationFiles.map((fileName) => (
-                  <option key={fileName} value={fileName}>
-                    {fileName}
-                  </option>
-                ))}
-              </Select>
+              <div className="grid grid-cols-[minmax(0,1fr),auto] gap-2">
+                <Select
+                  value={selectedCalibrationFile}
+                  onChange={(event) => {
+                    setSelectedCalibrationFile(event.target.value);
+                    setCalibrationFilePendingDelete("");
+                    if (event.target.value) {
+                      setCalibrationFileName(event.target.value);
+                    }
+                  }}
+                >
+                  <option value="">No saved calibrations</option>
+                  {calibrationFiles.map((fileName) => (
+                    <option key={fileName} value={fileName}>
+                      {fileName}
+                    </option>
+                  ))}
+                </Select>
+                <Button
+                  aria-label="Delete selected calibration"
+                  disabled={!selectedCalibrationFile}
+                  size="icon"
+                  title="Delete selected calibration"
+                  variant="outline"
+                  onClick={() => setCalibrationFilePendingDelete(selectedCalibrationFile)}
+                >
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </div>
+              {calibrationFilePendingDelete ? (
+                <div className="grid grid-cols-[minmax(0,1fr),auto,auto] items-center gap-2 rounded-lg border border-rose-200 bg-rose-50 px-2 py-2 text-[11px] text-rose-700">
+                  <div className="truncate" title={calibrationFilePendingDelete}>
+                    Delete {calibrationFilePendingDelete}?
+                  </div>
+                  <Button
+                    className="h-7 px-2 text-[11px]"
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setCalibrationFilePendingDelete("")}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    className="h-7 px-2 text-[11px]"
+                    size="sm"
+                    variant="destructive"
+                    onClick={() => void deleteCalibrationFile(calibrationFilePendingDelete)}
+                  >
+                    Delete
+                  </Button>
+                </div>
+              ) : null}
               <div className="grid grid-cols-2 gap-2">
                 <Button size="sm" variant="outline" onClick={saveCalibrationFile}>
                   <Save className="h-4 w-4" />
@@ -517,8 +585,8 @@ export function PumpCalibrationPanel() {
                 ) : null}
               </div>
 
-              <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr),auto,auto]">
-                <div className="space-y-2">
+              <div className="grid gap-4 sm:grid-cols-2 2xl:grid-cols-[minmax(160px,0.9fr),minmax(190px,1fr),minmax(190px,1fr)]">
+                <div className="min-w-0 space-y-2 sm:col-span-2 2xl:col-span-1">
                   <Label htmlFor="calibration-direction">Direction</Label>
                   <Select
                     id="calibration-direction"
@@ -534,7 +602,7 @@ export function PumpCalibrationPanel() {
                 </div>
 
                 <Button
-                  className="self-end"
+                  className="w-full self-end"
                   disabled={!canRunCalibration}
                   title={
                     isMainScheduleRunning
@@ -551,7 +619,7 @@ export function PumpCalibrationPanel() {
                   {isMainScheduleRunning ? "Locked" : isBoardBusy ? "Running" : "Run Calibration"}
                 </Button>
                 <Button
-                  className="self-end"
+                  className="w-full self-end"
                   disabled={!canStopCalibration}
                   title={
                     isCalibrationRunning

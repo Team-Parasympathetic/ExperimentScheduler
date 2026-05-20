@@ -2,6 +2,7 @@ import type {
   MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
 } from "react";
+import { useMemo } from "react";
 import type { Block, Row, TriggerMode } from "@/types/scheduler";
 import {
   getFixedPumpCalibrationFit,
@@ -81,8 +82,12 @@ export function ScheduleBlock({
   shadeIndex,
   width,
 }: ScheduleBlockProps) {
-  const calibration = usePumpCalibrationStore((state) =>
-    normalizePumpCalibrationConfig(state.calibrationsByRowId[block.rowId]),
+  const storedCalibration = usePumpCalibrationStore(
+    (state) => state.calibrationsByRowId[block.rowId],
+  );
+  const calibration = useMemo(
+    () => normalizePumpCalibrationConfig(storedCalibration),
+    [storedCalibration],
   );
   const fixedFit = getFixedPumpCalibrationFit(calibration.fixed);
   const deviceType = row.deviceType;

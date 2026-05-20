@@ -264,6 +264,22 @@ fn load_data_file<R: Runtime>(
         .map_err(|error| format!("Could not read {}: {error}", path.to_string_lossy()))
 }
 
+#[tauri::command]
+fn delete_data_file<R: Runtime>(
+    app: AppHandle<R>,
+    folder: String,
+    file_name: String,
+) -> Result<String, String> {
+    let directory = data_directory(&app, &folder)?;
+    let normalized_file_name = normalize_json_file_name(&file_name)?;
+    let path = directory.join(&normalized_file_name);
+
+    fs::remove_file(&path)
+        .map_err(|error| format!("Could not delete {}: {error}", path.to_string_lossy()))?;
+
+    Ok(normalized_file_name)
+}
+
 fn command_error(message: impl Into<String>, log: Vec<SerialLogEntry>) -> BoardCommandResult {
     BoardCommandResult {
         ok: false,
@@ -335,7 +351,8 @@ pub fn run() {
             stop_schedule,
             list_data_files,
             save_data_file,
-            load_data_file
+            load_data_file,
+            delete_data_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -309,16 +309,14 @@ export function getFixedPumpCalibrationFit({
     };
   }
 
-  const meanSeconds =
-    usablePoints.reduce((sum, point) => sum + point.seconds, 0) / usablePoints.length;
   const meanVolume =
     usablePoints.reduce((sum, point) => sum + point.volumeUl, 0) / usablePoints.length;
-  const timeVariance = usablePoints.reduce(
-    (sum, point) => sum + (point.seconds - meanSeconds) ** 2,
+  const timeMagnitude = usablePoints.reduce(
+    (sum, point) => sum + point.seconds ** 2,
     0,
   );
 
-  if (timeVariance <= Number.EPSILON) {
+  if (timeMagnitude <= Number.EPSILON) {
     return {
       isValid: false,
       pointCount: usablePoints.length,
@@ -328,18 +326,15 @@ export function getFixedPumpCalibrationFit({
     };
   }
 
-  const covariance = usablePoints.reduce(
-    (sum, point) => sum + (point.seconds - meanSeconds) * (point.volumeUl - meanVolume),
-    0,
-  );
-  const slopeVolumeUlPerSecond = covariance / timeVariance;
-  const interceptVolumeUl = meanVolume - slopeVolumeUlPerSecond * meanSeconds;
+  const slopeVolumeUlPerSecond =
+    usablePoints.reduce((sum, point) => sum + point.seconds * point.volumeUl, 0) /
+    timeMagnitude;
   const totalVolumeVariance = usablePoints.reduce(
     (sum, point) => sum + (point.volumeUl - meanVolume) ** 2,
     0,
   );
   const residualVariance = usablePoints.reduce((sum, point) => {
-    const predictedVolume = slopeVolumeUlPerSecond * point.seconds + interceptVolumeUl;
+    const predictedVolume = slopeVolumeUlPerSecond * point.seconds;
     return sum + (point.volumeUl - predictedVolume) ** 2;
   }, 0);
 
@@ -347,7 +342,7 @@ export function getFixedPumpCalibrationFit({
     isValid: slopeVolumeUlPerSecond > 0,
     pointCount: usablePoints.length,
     slopeVolumeUlPerSecond,
-    interceptVolumeUl,
+    interceptVolumeUl: 0,
     rSquared:
       totalVolumeVariance <= Number.EPSILON
         ? 1
