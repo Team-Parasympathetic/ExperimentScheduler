@@ -30,6 +30,7 @@ type DetectionState = "idle" | "detecting" | "detected" | "not-detected";
 interface DetectDeviceOptions {
   logHeader?: string;
   shouldApplyResult?: () => boolean;
+  assignRows?: boolean;
 }
 
 const BACKPLANE_SLOT_COUNT = 8;
@@ -399,6 +400,7 @@ export function DeviceOverviewPanel() {
   const detectDevice = useCallback(async (options: DetectDeviceOptions = {}) => {
     const logHeader = options.logHeader ?? "# Detect";
     const shouldApplyResult = options.shouldApplyResult ?? (() => true);
+    const shouldAssignRows = options.assignRows ?? false;
     const trimmedComPort = comPort.trim();
 
     if (isBoardLocked) {
@@ -424,7 +426,7 @@ export function DeviceOverviewPanel() {
         setSlots(result.detected ? normalizeSlotDetection(result.slots) : getEmptySlotDetection());
         setDetectedSlots(result.detected ? result.slots : []);
         syncDetectedPumpHardware(result.detected ? result.slots : [], {
-          assignRows: result.detected,
+          assignRows: shouldAssignRows && result.detected,
         });
         appendSerialLog(result.log, `${logHeader} ${trimmedComPort || "COM port"}`);
       }
@@ -460,6 +462,7 @@ export function DeviceOverviewPanel() {
         }
 
         const isDetected = await detectDevice({
+          assignRows: true,
           logHeader: `# Startup detect ${attempt}/${STARTUP_DETECTION_ATTEMPTS}`,
           shouldApplyResult: () => !isCancelled,
         });

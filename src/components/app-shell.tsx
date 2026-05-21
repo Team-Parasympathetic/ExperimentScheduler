@@ -3,7 +3,7 @@ import { BlockContextMenu } from "@/components/block-context-menu";
 import { SchedulerLayout } from "@/components/scheduler-layout";
 import { TopToolbar } from "@/components/top-toolbar";
 import { ROW_HEADER_WIDTH } from "@/lib/layout";
-import { pxToMs } from "@/lib/time";
+import { msToPx, pxToMs } from "@/lib/time";
 import { useSchedulerStore } from "@/store/scheduler-store";
 import type { Block } from "@/types/scheduler";
 
@@ -19,6 +19,7 @@ export function AppShell() {
   const zoomPxPerMinute = useSchedulerStore((state) => state.zoomPxPerMinute);
   const totalDurationMs = useSchedulerStore((state) => state.experimentDurationMs);
   const experimentState = useSchedulerStore((state) => state.experimentState);
+  const playheadMs = useSchedulerStore((state) => state.playheadMs);
   const deleteBlocks = useSchedulerStore((state) => state.deleteBlocks);
   const pasteBlocks = useSchedulerStore((state) => state.pasteBlocks);
   const undo = useSchedulerStore((state) => state.undo);
@@ -73,6 +74,33 @@ export function AppShell() {
       window.cancelAnimationFrame(animationFrameId);
     };
   }, [experimentState, syncPlayhead]);
+
+  useEffect(() => {
+    if (experimentState !== "running") {
+      return;
+    }
+
+    const node = scrollRef.current;
+    if (!node) {
+      return;
+    }
+
+    const visibleTrackWidth = Math.max(0, node.clientWidth - ROW_HEADER_WIDTH);
+    if (visibleTrackWidth <= 0) {
+      return;
+    }
+
+    const playheadX = msToPx(playheadMs, zoomPxPerMinute);
+    const viewportStartPx = node.scrollLeft;
+    const followEdgePx = viewportStartPx + visibleTrackWidth * 0.82;
+    const resetEdgePx = visibleTrackWidth * 0.04;
+
+    if (playheadX > followEdgePx) {
+      node.scrollLeft = Math.max(0, playheadX - visibleTrackWidth * 0.78);
+    } else if (playheadX < viewportStartPx + resetEdgePx) {
+      node.scrollLeft = Math.max(0, playheadX - visibleTrackWidth * 0.12);
+    }
+  }, [experimentState, playheadMs, zoomPxPerMinute]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
