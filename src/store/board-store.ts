@@ -55,6 +55,33 @@ interface BoardState {
   setScheduleMessage: (message: string) => void;
 }
 
+const COM_PORT_STORAGE_KEY = "experiment-scheduler:last-com-port";
+const DEFAULT_COM_PORT = "COM7";
+
+function getStoredComPort() {
+  if (typeof window === "undefined") {
+    return DEFAULT_COM_PORT;
+  }
+
+  try {
+    return window.localStorage.getItem(COM_PORT_STORAGE_KEY) || DEFAULT_COM_PORT;
+  } catch {
+    return DEFAULT_COM_PORT;
+  }
+}
+
+function storeComPort(comPort: string) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(COM_PORT_STORAGE_KEY, comPort);
+  } catch {
+    // Ignore storage failures; the in-memory value still updates.
+  }
+}
+
 function formatHex(value: number, width: number) {
   return `0x${value.toString(16).toUpperCase().padStart(width, "0")}`;
 }
@@ -65,7 +92,7 @@ export function formatSerialLogEntry(entry: SerialLogEntry) {
 }
 
 export const useBoardStore = create<BoardState>((set) => ({
-  comPort: "COM7",
+  comPort: getStoredComPort(),
   detectedSlots: [],
   scheduleCommandState: null,
   isCalibrationRunning: false,
@@ -83,7 +110,10 @@ export const useBoardStore = create<BoardState>((set) => ({
       };
     }),
   clearSerialLog: () => set({ serialLog: [] }),
-  setComPort: (comPort) => set({ comPort }),
+  setComPort: (comPort) => {
+    storeComPort(comPort);
+    set({ comPort });
+  },
   setDetectedSlots: (detectedSlots) => set({ detectedSlots }),
   setScheduleCommandState: (scheduleCommandState) => set({ scheduleCommandState }),
   setCalibrationRunning: (isCalibrationRunning) => set({ isCalibrationRunning }),

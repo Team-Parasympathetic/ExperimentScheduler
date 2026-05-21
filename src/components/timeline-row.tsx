@@ -1,4 +1,7 @@
-import type { PointerEvent as ReactPointerEvent } from "react";
+import type {
+  MouseEvent as ReactMouseEvent,
+  PointerEvent as ReactPointerEvent,
+} from "react";
 import { msToPx, pxToMs } from "@/lib/time";
 import { ScheduleBlock } from "@/components/schedule-block";
 import { cn } from "@/lib/utils";
@@ -13,9 +16,13 @@ interface TimelineRowProps {
   zoomPxPerMinute: number;
   timelineWidth: number;
   totalDurationMs: number;
-  selectedBlockId: string | null;
+  selectedBlockIds: string[];
   isStriped: boolean;
-  onSelectBlock: (blockId: string) => void;
+  onSelectBlock: (
+    blockId: string,
+    options?: { additive?: boolean; range?: boolean },
+  ) => void;
+  onSetPasteTarget: (rowId: string, timeMs: number) => void;
   onOpenContextMenu: (blockId: string, x: number, y: number) => void;
   onCreateBlock: (timeMs: number) => void;
   onBlockPointerDown: (
@@ -34,7 +41,8 @@ export function TimelineRow({
   onCreateBlock,
   onOpenContextMenu,
   onSelectBlock,
-  selectedBlockId,
+  onSetPasteTarget,
+  selectedBlockIds,
   timelineWidth,
   totalDurationMs,
   zoomPxPerMinute,
@@ -64,6 +72,21 @@ export function TimelineRow({
         const offsetX = event.clientX - rect.left;
         const timeMs = Math.max(0, Math.min(totalDurationMs, pxToMs(offsetX, zoomPxPerMinute)));
         onCreateBlock(timeMs);
+      }}
+      onPointerDown={(event) => {
+        if (event.button !== 0 || isScheduleStatus) {
+          return;
+        }
+
+        const target = event.target as HTMLElement | null;
+        if (target?.closest("[data-block-root='true']")) {
+          return;
+        }
+
+        const rect = event.currentTarget.getBoundingClientRect();
+        const offsetX = event.clientX - rect.left;
+        const timeMs = Math.max(0, Math.min(totalDurationMs, pxToMs(offsetX, zoomPxPerMinute)));
+        onSetPasteTarget(row.id, timeMs);
       }}
     >
       <div
@@ -96,7 +119,7 @@ export function TimelineRow({
           key={block.id}
           block={block}
           row={row}
-          isSelected={selectedBlockId === block.id}
+          isSelected={selectedBlockIds.includes(block.id)}
           left={msToPx(block.startMs, zoomPxPerMinute)}
           shadeIndex={blockIndex}
           width={msToPx(block.durationMs, zoomPxPerMinute)}
@@ -113,7 +136,12 @@ export function TimelineRow({
           onPointerDownResizeEnd={(event) =>
             onBlockPointerDown(block.id, "resize-end", event)
           }
-          onSelect={() => onSelectBlock(block.id)}
+          onSelect={(event: ReactMouseEvent<HTMLDivElement>) =>
+            onSelectBlock(block.id, {
+              additive: event.metaKey || event.ctrlKey,
+              range: event.shiftKey,
+            })
+          }
         />
       ))}
     </div>

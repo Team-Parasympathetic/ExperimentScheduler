@@ -27,7 +27,7 @@ interface ScheduleBlockProps {
   width: number;
   shadeIndex: number;
   isSelected: boolean;
-  onSelect: () => void;
+  onSelect: (event: ReactMouseEvent<HTMLDivElement>) => void;
   onContextMenu: (event: ReactMouseEvent<HTMLDivElement>) => void;
   onPointerDownMove: (event: ReactPointerEvent<HTMLDivElement>) => void;
   onPointerDownResizeStart: (event: ReactPointerEvent<HTMLDivElement>) => void;
@@ -136,7 +136,7 @@ export function ScheduleBlock({
       }}
       onClick={(event) => {
         event.stopPropagation();
-        onSelect();
+        onSelect(event);
       }}
       onContextMenu={onContextMenu}
       onPointerDown={onPointerDownMove}

@@ -14,19 +14,19 @@ interface ContextMenuState {
 }
 
 export function AppShell() {
-  const selectedBlockId = useSchedulerStore((state) => state.selectedBlockId);
+  const selectedBlockIds = useSchedulerStore((state) => state.selectedBlockIds);
   const blocks = useSchedulerStore((state) => state.blocks);
   const zoomPxPerMinute = useSchedulerStore((state) => state.zoomPxPerMinute);
   const totalDurationMs = useSchedulerStore((state) => state.experimentDurationMs);
   const experimentState = useSchedulerStore((state) => state.experimentState);
-  const deleteBlock = useSchedulerStore((state) => state.deleteBlock);
-  const pasteBlock = useSchedulerStore((state) => state.pasteBlock);
+  const deleteBlocks = useSchedulerStore((state) => state.deleteBlocks);
+  const pasteBlocks = useSchedulerStore((state) => state.pasteBlocks);
   const syncPlayhead = useSchedulerStore((state) => state.syncPlayhead);
   const setSelectedBlock = useSchedulerStore((state) => state.setSelectedBlock);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
-  const [copiedBlock, setCopiedBlock] = useState<Block | null>(null);
+  const [copiedBlocks, setCopiedBlocks] = useState<Block[]>([]);
   const [viewportStartMs, setViewportStartMs] = useState(0);
   const [viewportDurationMs, setViewportDurationMs] = useState(20 * 60_000);
 
@@ -81,24 +81,27 @@ export function AppShell() {
         target instanceof HTMLSelectElement ||
         target?.isContentEditable;
 
-      if (event.key === "Delete" && selectedBlockId && !isTypingTarget) {
+      if (event.key === "Delete" && selectedBlockIds.length > 0 && !isTypingTarget) {
         event.preventDefault();
-        deleteBlock(selectedBlockId);
+        deleteBlocks(selectedBlockIds);
       }
 
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c" && !isTypingTarget) {
-        const block = blocks.find((item) => item.id === selectedBlockId);
+        const selectedBlockIdSet = new Set(selectedBlockIds);
+        const blocksToCopy = blocks
+          .filter((item) => selectedBlockIdSet.has(item.id))
+          .sort((left, right) => left.startMs - right.startMs || left.id.localeCompare(right.id));
 
-        if (block) {
+        if (blocksToCopy.length > 0) {
           event.preventDefault();
-          setCopiedBlock({ ...block });
+          setCopiedBlocks(blocksToCopy.map((block) => ({ ...block })));
         }
       }
 
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "v" && !isTypingTarget) {
-        if (copiedBlock) {
+        if (copiedBlocks.length > 0) {
           event.preventDefault();
-          pasteBlock(copiedBlock);
+          pasteBlocks(copiedBlocks);
         }
       }
 
@@ -109,7 +112,7 @@ export function AppShell() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [blocks, copiedBlock, deleteBlock, pasteBlock, selectedBlockId]);
+  }, [blocks, copiedBlocks, deleteBlocks, pasteBlocks, selectedBlockIds]);
 
   return (
     <div className="adaptive-shell relative flex h-full flex-col overflow-hidden px-5 pb-5 pt-4 text-foreground">
@@ -136,7 +139,9 @@ export function AppShell() {
         scrollRef={scrollRef}
         totalDurationMs={totalDurationMs}
         onOpenBlockContextMenu={(blockId, x, y) => {
-          setSelectedBlock(blockId);
+          if (!selectedBlockIds.includes(blockId)) {
+            setSelectedBlock(blockId);
+          }
           setContextMenu({ blockId, x, y });
         }}
         onDismissContextMenu={() => setContextMenu(null)}

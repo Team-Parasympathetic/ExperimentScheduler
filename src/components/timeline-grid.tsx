@@ -60,10 +60,11 @@ export function TimelineGrid({
   const gridSizeMs = useSchedulerStore((state) => state.gridSizeMs);
   const zoomPxPerMinute = useSchedulerStore((state) => state.zoomPxPerMinute);
   const playheadMs = useSchedulerStore((state) => state.playheadMs);
-  const selectedBlockId = useSchedulerStore((state) => state.selectedBlockId);
+  const selectedBlockIds = useSchedulerStore((state) => state.selectedBlockIds);
   const addBlock = useSchedulerStore((state) => state.addBlock);
   const updateBlock = useSchedulerStore((state) => state.updateBlock);
   const setSelectedBlock = useSchedulerStore((state) => state.setSelectedBlock);
+  const setPasteTarget = useSchedulerStore((state) => state.setPasteTarget);
   const setZoomPxPerMinute = useSchedulerStore((state) => state.setZoomPxPerMinute);
   const [dragState, setDragState] = useState<DragState | null>(null);
   const [panState, setPanState] = useState<PanState | null>(null);
@@ -376,11 +377,15 @@ export function TimelineGrid({
                   gridSizeMs={renderedGridSizeMs}
                   isStriped={rowIndex % 2 === 1}
                   row={row}
-                  selectedBlockId={selectedBlockId}
+                  selectedBlockIds={selectedBlockIds}
                   timelineWidth={timelineWidth}
                   totalDurationMs={totalDurationMs}
                   zoomPxPerMinute={zoomPxPerMinute}
                   onBlockPointerDown={(blockId, mode, event) => {
+                    if (event.metaKey || event.ctrlKey || event.shiftKey) {
+                      return;
+                    }
+
                     const block = getBlockById(blocks, blockId);
                     const originRow = rowsById[block?.rowId ?? ""];
                     if (!block || !originRow) {
@@ -405,6 +410,10 @@ export function TimelineGrid({
                     addBlock(row.id, snapMs(timeMs, gridSizeMs));
                   }}
                   onOpenContextMenu={onOpenBlockContextMenu}
+                  onSetPasteTarget={(rowId, timeMs) => {
+                    setSelectedBlock(null);
+                    setPasteTarget(rowId, snapMs(timeMs, gridSizeMs));
+                  }}
                   onSelectBlock={setSelectedBlock}
                 />
               </div>
