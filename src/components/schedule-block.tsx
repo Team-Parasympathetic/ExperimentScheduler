@@ -69,6 +69,10 @@ function formatNumber(value: number, digits = 1) {
   });
 }
 
+function getEstimatedTextWidth(text: string, averageCharacterWidth = 7) {
+  return text.length * averageCharacterWidth;
+}
+
 export function ScheduleBlock({
   block,
   row,
@@ -93,7 +97,6 @@ export function ScheduleBlock({
   const deviceType = row.deviceType;
   const isTrigger = deviceType === "trigger";
   const isFixedRatePump = deviceType === "peristaltic" && row.pumpRateMode === "fixed";
-  const showContent = width >= 132;
   const isAlternateShade = shadeIndex % 2 === 1;
   const triggerMode = block.triggerMode ?? DEFAULT_TRIGGER_MODE;
   const primaryLabel = isTrigger
@@ -115,12 +118,31 @@ export function ScheduleBlock({
           getFixedPumpFlowRateForDuration(block.durationMs, fixedFit),
         )}`
       : getFlowRateLabel(block.flowRate);
+  const durationLabel = formatDuration(block.durationMs);
+  const deviceTypeLabel = getDeviceTypeLabel(deviceType);
+  const contentWidth = Math.max(0, width - 34);
+  const resizeHandleWidth = Math.round(
+    width < 24 ? Math.min(7, Math.max(4, width * 0.28)) : Math.min(18, Math.max(14, width * 0.28)),
+  );
+  const showHeader =
+    contentWidth >=
+    Math.max(128, getEstimatedTextWidth(deviceTypeLabel, 5.8), getEstimatedTextWidth(primaryLabel, 8) + 22);
+  const showFooter =
+    showHeader &&
+    contentWidth >=
+      Math.max(
+        164,
+        getEstimatedTextWidth(secondaryLabel, 6.7) +
+          getEstimatedTextWidth(durationLabel, 7) +
+          34,
+      );
 
   return (
     <div
       data-block-root="true"
       className={cn(
-        "absolute top-2 flex h-[76px] select-none flex-col justify-between overflow-visible rounded-2xl border px-4 py-3 text-left shadow-[0_16px_32px_-22px_rgba(15,23,42,0.28)] transition-colors",
+        "absolute top-2 flex h-[76px] min-w-0 touch-none select-none flex-col justify-between overflow-visible rounded-2xl border text-left shadow-[0_16px_32px_-22px_rgba(15,23,42,0.28)] transition-colors",
+        showHeader ? "cursor-grab px-4 py-3 active:cursor-grabbing" : "cursor-grab p-0 active:cursor-grabbing",
         isTrigger
           ? isAlternateShade
             ? "border-violet-300 bg-[linear-gradient(180deg,rgba(237,233,254,0.98),rgba(196,181,253,0.92))] text-slate-800"
@@ -133,6 +155,7 @@ export function ScheduleBlock({
       style={{
         left,
         width,
+        minWidth: 0,
       }}
       onClick={(event) => {
         event.stopPropagation();
@@ -142,25 +165,30 @@ export function ScheduleBlock({
       onPointerDown={onPointerDownMove}
       role="button"
       tabIndex={0}
+      aria-label={`${deviceTypeLabel} ${primaryLabel} ${secondaryLabel} ${durationLabel}`}
     >
       <div
-        className="absolute -left-1 inset-y-0 z-20 w-8 cursor-ew-resize rounded-l-2xl bg-white/0 transition hover:bg-slate-900/6"
+        data-block-resize-handle="start"
+        className="absolute -left-1 inset-y-0 z-20 cursor-ew-resize rounded-l-2xl bg-white/0 transition hover:bg-slate-900/8"
+        style={{ width: resizeHandleWidth }}
         onPointerDown={(event) => {
           event.stopPropagation();
           onPointerDownResizeStart(event);
         }}
       />
       <div
-        className="absolute -right-1 inset-y-0 z-20 w-8 cursor-ew-resize rounded-r-2xl bg-white/0 transition hover:bg-slate-900/6"
+        data-block-resize-handle="end"
+        className="absolute -right-1 inset-y-0 z-20 cursor-ew-resize rounded-r-2xl bg-white/0 transition hover:bg-slate-900/8"
+        style={{ width: resizeHandleWidth }}
         onPointerDown={(event) => {
           event.stopPropagation();
           onPointerDownResizeEnd(event);
         }}
       />
 
-      {isTrigger && width >= 38 ? <TriggerGlyph mode={triggerMode} /> : null}
+      {isTrigger && width >= 56 ? <TriggerGlyph mode={triggerMode} /> : null}
 
-      {showContent ? (
+      {showHeader ? (
         <>
           <div className="pointer-events-none flex items-start justify-between gap-3 pr-6">
             <div className="min-w-0">
@@ -173,14 +201,16 @@ export function ScheduleBlock({
             </div>
           </div>
 
-          <div className="pointer-events-none flex items-center justify-between gap-3 text-xs">
-            <div className="truncate rounded-full border border-white/60 bg-white/72 px-2.5 py-1 font-medium text-slate-700">
-              {secondaryLabel}
+          {showFooter ? (
+            <div className="pointer-events-none flex items-center justify-between gap-3 text-xs">
+              <div className="truncate rounded-full border border-white/60 bg-white/72 px-2.5 py-1 font-medium text-slate-700">
+                {secondaryLabel}
+              </div>
+              <div className="truncate font-mono text-slate-500">
+                {durationLabel}
+              </div>
             </div>
-            <div className="truncate font-mono text-slate-500">
-              {formatDuration(block.durationMs)}
-            </div>
-          </div>
+          ) : null}
         </>
       ) : null}
     </div>

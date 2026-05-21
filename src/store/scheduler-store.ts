@@ -2,7 +2,9 @@ import { create } from "zustand";
 import {
   DEFAULT_EXPERIMENT_DURATION_MS,
   DEFAULT_ZOOM_PX_PER_MINUTE,
+  MAX_ZOOM_PX_PER_MINUTE,
   MIN_BLOCK_DURATION_MS,
+  MIN_ZOOM_PX_PER_MINUTE,
   SECOND_MS,
   getBlockEnd,
   getScheduleDuration,
@@ -37,10 +39,36 @@ import type {
   TriggerMode,
 } from "@/types/scheduler";
 
+interface SchedulerHistorySnapshot {
+  rows: Row[];
+  blocks: Block[];
+  selectedBlockId: string | null;
+  selectedBlockIds: string[];
+  selectionAnchorBlockId: string | null;
+  selectedRowId: string | null;
+  pasteTargetStartMs: number | null;
+  gridSizeMs: number;
+  zoomPxPerMinute: number;
+  experimentDurationMs: number;
+}
+
+interface MutationOptions {
+  recordHistory?: boolean;
+}
+
+interface BlockMoveUpdate {
+  blockId: string;
+  rowId: string;
+  startMs: number;
+}
+
 interface SchedulerState {
   rows: Row[];
   blocks: Block[];
   availablePumpHardwareIds: number[];
+  past: SchedulerHistorySnapshot[];
+  future: SchedulerHistorySnapshot[];
+  pendingHistorySnapshot: SchedulerHistorySnapshot | null;
   selectedBlockId: string | null;
   selectedBlockIds: string[];
   selectionAnchorBlockId: string | null;
@@ -64,6 +92,10 @@ interface SchedulerState {
   startExperiment: () => void;
   stopExperiment: () => void;
   resetExperiment: () => void;
+  undo: () => void;
+  redo: () => void;
+  beginHistoryEntry: () => void;
+  commitHistoryEntry: () => void;
   syncPlayhead: (nowMs?: number) => void;
   syncDetectedPumpHardware: (
     slots: Array<{ slot: number; present: boolean; cardType: string }>,
@@ -82,7 +114,12 @@ interface SchedulerState {
   addBlock: (rowId: string, startMs: number, durationMs?: number) => void;
   pasteBlock: (block: Block) => void;
   pasteBlocks: (blocks: Block[]) => void;
-  updateBlock: (blockId: string, patch: Partial<Omit<Block, "id">>) => void;
+  updateBlock: (
+    blockId: string,
+    patch: Partial<Omit<Block, "id">>,
+    options?: MutationOptions,
+  ) => void;
+  moveBlocks: (updates: BlockMoveUpdate[], options?: MutationOptions) => void;
   deleteBlock: (blockId: string) => void;
   deleteBlocks: (blockIds: string[]) => void;
 }
@@ -719,6 +756,76 @@ function getPlayheadSnapshot(
   };
 }
 
+const HISTORY_LIMIT = 80;
+
+function getHistorySnapshot(state: SchedulerState): SchedulerHistorySnapshot {
+  return {
+    rows: state.rows.map((row) => ({ ...row })),
+    blocks: state.blocks.map((block) => ({ ...block })),
+    selectedBlockId: state.selectedBlockId,
+    selectedBlockIds: [...state.selectedBlockIds],
+    selectionAnchorBlockId: state.selectionAnchorBlockId,
+    selectedRowId: state.selectedRowId,
+    pasteTargetStartMs: state.pasteTargetStartMs,
+    gridSizeMs: state.gridSizeMs,
+    zoomPxPerMinute: state.zoomPxPerMinute,
+    experimentDurationMs: state.experimentDurationMs,
+  };
+}
+
+function restoreHistorySnapshot(
+  snapshot: SchedulerHistorySnapshot,
+): Pick<
+  SchedulerState,
+  | "rows"
+  | "blocks"
+  | "selectedBlockId"
+  | "selectedBlockIds"
+  | "selectionAnchorBlockId"
+  | "selectedRowId"
+  | "pasteTargetStartMs"
+  | "gridSizeMs"
+  | "zoomPxPerMinute"
+  | "experimentDurationMs"
+> {
+  return {
+    rows: snapshot.rows.map((row) => ({ ...row })),
+    blocks: snapshot.blocks.map((block) => ({ ...block })),
+    selectedBlockId: snapshot.selectedBlockId,
+    selectedBlockIds: [...snapshot.selectedBlockIds],
+    selectionAnchorBlockId: snapshot.selectionAnchorBlockId,
+    selectedRowId: snapshot.selectedRowId,
+    pasteTargetStartMs: snapshot.pasteTargetStartMs,
+    gridSizeMs: snapshot.gridSizeMs,
+    zoomPxPerMinute: snapshot.zoomPxPerMinute,
+    experimentDurationMs: snapshot.experimentDurationMs,
+  };
+}
+
+function areHistorySnapshotsEqual(
+  left: SchedulerHistorySnapshot,
+  right: SchedulerHistorySnapshot,
+) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function withHistory<T extends Partial<SchedulerState>>(
+  state: SchedulerState,
+  patch: T,
+  options: MutationOptions = {},
+): T | (T & Pick<SchedulerState, "past" | "future" | "pendingHistorySnapshot">) {
+  if (options.recordHistory === false) {
+    return patch;
+  }
+
+  return {
+    ...patch,
+    past: [...state.past, getHistorySnapshot(state)].slice(-HISTORY_LIMIT),
+    future: [],
+    pendingHistorySnapshot: null,
+  };
+}
+
 const initialExperimentDurationMs = getScheduleDuration(
   initialBlocks,
   DEFAULT_EXPERIMENT_DURATION_MS,
@@ -728,6 +835,9 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
   rows: initialRows,
   blocks: initialBlocks,
   availablePumpHardwareIds: [],
+  past: [],
+  future: [],
+  pendingHistorySnapshot: null,
   selectedBlockId: initialBlocks[0]?.id ?? null,
   selectedBlockIds: initialBlocks[0] ? [initialBlocks[0].id] : [],
   selectionAnchorBlockId: initialBlocks[0]?.id ?? null,
@@ -763,22 +873,31 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
       pasteTargetStartMs: startMs,
     }),
   setGridSizeMs: (gridSizeMs) =>
+    set((state) =>
+      withHistory(state, {
+        gridSizeMs: Math.max(
+          FIRMWARE_SCHEDULE_LIMITS.minEventSpacingMs,
+          Math.round(gridSizeMs),
+        ),
+      }),
+    ),
+  setZoomPxPerMinute: (zoomPxPerMinute) =>
     set({
-      gridSizeMs: Math.max(
-        FIRMWARE_SCHEDULE_LIMITS.minEventSpacingMs,
-        Math.round(gridSizeMs),
+      zoomPxPerMinute: clamp(
+        zoomPxPerMinute,
+        MIN_ZOOM_PX_PER_MINUTE,
+        MAX_ZOOM_PX_PER_MINUTE,
       ),
     }),
-  setZoomPxPerMinute: (zoomPxPerMinute) => set({ zoomPxPerMinute }),
   setExperimentDurationMs: (experimentDurationMs) =>
     set((state) => {
       const nowMs = Date.now();
       const nextExperimentDurationMs = getScheduleDuration(state.blocks, experimentDurationMs);
 
-      return {
+      return withHistory(state, {
         experimentDurationMs: nextExperimentDurationMs,
         ...getPlayheadSnapshot(state, nextExperimentDurationMs, nowMs),
-      };
+      });
     }),
   startExperiment: () =>
     set((state) => {
@@ -819,6 +938,68 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
       playheadMs: 0,
       playheadStartOffsetMs: 0,
       playheadStartTimestamp: null,
+    }),
+  undo: () =>
+    set((state) => {
+      const previousSnapshot = state.past[state.past.length - 1];
+
+      if (!previousSnapshot) {
+        return state;
+      }
+
+      const currentSnapshot = getHistorySnapshot(state);
+      const nextExperimentDurationMs = previousSnapshot.experimentDurationMs;
+      const nowMs = Date.now();
+
+      return {
+        ...restoreHistorySnapshot(previousSnapshot),
+        past: state.past.slice(0, -1),
+        future: [currentSnapshot, ...state.future].slice(0, HISTORY_LIMIT),
+        pendingHistorySnapshot: null,
+        ...getPlayheadSnapshot(state, nextExperimentDurationMs, nowMs),
+      };
+    }),
+  redo: () =>
+    set((state) => {
+      const nextSnapshot = state.future[0];
+
+      if (!nextSnapshot) {
+        return state;
+      }
+
+      const currentSnapshot = getHistorySnapshot(state);
+      const nextExperimentDurationMs = nextSnapshot.experimentDurationMs;
+      const nowMs = Date.now();
+
+      return {
+        ...restoreHistorySnapshot(nextSnapshot),
+        past: [...state.past, currentSnapshot].slice(-HISTORY_LIMIT),
+        future: state.future.slice(1),
+        pendingHistorySnapshot: null,
+        ...getPlayheadSnapshot(state, nextExperimentDurationMs, nowMs),
+      };
+    }),
+  beginHistoryEntry: () =>
+    set((state) =>
+      state.pendingHistorySnapshot
+        ? state
+        : { pendingHistorySnapshot: getHistorySnapshot(state) },
+    ),
+  commitHistoryEntry: () =>
+    set((state) => {
+      if (!state.pendingHistorySnapshot) {
+        return state;
+      }
+
+      if (areHistorySnapshotsEqual(state.pendingHistorySnapshot, getHistorySnapshot(state))) {
+        return { pendingHistorySnapshot: null };
+      }
+
+      return {
+        past: [...state.past, state.pendingHistorySnapshot].slice(-HISTORY_LIMIT),
+        future: [],
+        pendingHistorySnapshot: null,
+      };
     }),
   syncPlayhead: (nowMs = Date.now()) =>
     set((state) => {
@@ -867,14 +1048,18 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
 
       const selectedBlock = schedule.blocks[0] ?? null;
 
-      return {
+      return withHistory(state, {
         rows: normalizeLoadedRows(schedule.rows),
         blocks: schedule.blocks,
         gridSizeMs: Math.max(
           FIRMWARE_SCHEDULE_LIMITS.minEventSpacingMs,
           Math.round(schedule.gridSizeMs),
         ),
-        zoomPxPerMinute: schedule.zoomPxPerMinute,
+        zoomPxPerMinute: clamp(
+          schedule.zoomPxPerMinute,
+          MIN_ZOOM_PX_PER_MINUTE,
+          MAX_ZOOM_PX_PER_MINUTE,
+        ),
         experimentDurationMs: nextExperimentDurationMs,
         selectedBlockId: selectedBlock?.id ?? null,
         selectedBlockIds: selectedBlock ? [selectedBlock.id] : [],
@@ -886,7 +1071,7 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
         playheadStartOffsetMs: 0,
         playheadStartTimestamp: null,
         availablePumpHardwareIds: state.availablePumpHardwareIds,
-      };
+      });
     }),
   addRow: (deviceType = "peristaltic") =>
     set((state) => {
@@ -903,7 +1088,7 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
             )
           : null;
 
-      return {
+      return withHistory(state, {
         rows: [
           ...state.rows,
           {
@@ -917,7 +1102,7 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
             pumpRateMode: deviceType === "peristaltic" ? "variable" : undefined,
           },
         ],
-      };
+      });
     }),
   removeRow: (rowId) =>
     set((state) => {
@@ -955,13 +1140,13 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
       );
       const nowMs = Date.now();
 
-      return {
+      return withHistory(state, {
         rows: remainingRows,
         blocks: remainingBlocks,
         ...fallbackSelection,
         experimentDurationMs: nextExperimentDurationMs,
         ...getPlayheadSnapshot(state, nextExperimentDurationMs, nowMs),
-      };
+      });
     }),
   updateRow: (rowId, patch) =>
     set((state) => {
@@ -1076,7 +1261,7 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
       );
       const nowMs = Date.now();
 
-      return {
+      return withHistory(state, {
         rows: nextRows,
         blocks: nextBlocks,
         selectedBlockId: selectedBlock?.id ?? null,
@@ -1094,7 +1279,7 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
         pasteTargetStartMs: selectedBlock ? getBlockEnd(selectedBlock) : state.pasteTargetStartMs,
         experimentDurationMs: nextExperimentDurationMs,
         ...getPlayheadSnapshot(state, nextExperimentDurationMs, nowMs),
-      };
+      });
     }),
   addBlock: (rowId, startMs, durationMs = 2 * SECOND_MS) =>
     set((state) => {
@@ -1123,7 +1308,7 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
       );
       const nowMs = Date.now();
 
-      return {
+      return withHistory(state, {
         blocks: nextBlocks,
         selectedBlockId: newBlock.id,
         selectedBlockIds: [newBlock.id],
@@ -1132,12 +1317,19 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
         pasteTargetStartMs: getBlockEnd(newBlock),
         experimentDurationMs: nextExperimentDurationMs,
         ...getPlayheadSnapshot(state, nextExperimentDurationMs, nowMs),
-      };
+      });
     }),
-  pasteBlock: (block) => set((state) => pasteBlocksIntoState(state, [block])),
+  pasteBlock: (block) =>
+    set((state) => {
+      const patch = pasteBlocksIntoState(state, [block]);
+      return patch === state ? state : withHistory(state, patch);
+    }),
   pasteBlocks: (blocksToPaste) =>
-    set((state) => pasteBlocksIntoState(state, blocksToPaste)),
-  updateBlock: (blockId, patch) =>
+    set((state) => {
+      const patch = pasteBlocksIntoState(state, blocksToPaste);
+      return patch === state ? state : withHistory(state, patch);
+    }),
+  updateBlock: (blockId, patch, options = {}) =>
     set((state) => {
       const nextBlocks = state.blocks.map((block) => {
         if (block.id !== blockId) {
@@ -1245,11 +1437,85 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
         return state;
       }
 
-      return {
-        blocks: nextBlocks,
-        experimentDurationMs: nextExperimentDurationMs,
-        ...getPlayheadSnapshot(state, nextExperimentDurationMs, nowMs),
-      };
+      return withHistory(
+        state,
+        {
+          blocks: nextBlocks,
+          experimentDurationMs: nextExperimentDurationMs,
+          ...getPlayheadSnapshot(state, nextExperimentDurationMs, nowMs),
+        },
+        options,
+      );
+    }),
+  moveBlocks: (updates, options = {}) =>
+    set((state) => {
+      if (updates.length === 0) {
+        return state;
+      }
+
+      const updatesByBlockId = new Map(updates.map((update) => [update.blockId, update]));
+      const nextBlocks = state.blocks.map((block) => {
+        const update = updatesByBlockId.get(block.id);
+
+        if (!update) {
+          return block;
+        }
+
+        const currentRow = state.rows.find((row) => row.id === block.rowId);
+        const requestedRow = state.rows.find((row) => row.id === update.rowId);
+
+        if (
+          !currentRow ||
+          !requestedRow ||
+          requestedRow.isScheduleStatus ||
+          requestedRow.deviceType !== currentRow.deviceType
+        ) {
+          return block;
+        }
+
+        return {
+          ...block,
+          rowId: requestedRow.id,
+          startMs: clamp(
+            normalizeTimeValue(update.startMs, block.startMs, 0),
+            0,
+            Math.max(0, state.experimentDurationMs - block.durationMs),
+          ),
+        };
+      });
+
+      if (!isWithinEditableScheduleLimits(nextBlocks, state.rows)) {
+        return state;
+      }
+
+      const movedBlocks = nextBlocks.filter((block) => updatesByBlockId.has(block.id));
+      const selectedBlockIds = getSortedSelectedBlockIds(
+        nextBlocks,
+        state.selectedBlockIds.filter((blockId) => updatesByBlockId.has(blockId)),
+      );
+      const nextExperimentDurationMs = getScheduleDuration(
+        nextBlocks,
+        state.experimentDurationMs,
+      );
+      const nowMs = Date.now();
+      const nextPasteTargetStartMs =
+        movedBlocks.length > 0
+          ? Math.max(...movedBlocks.map((block) => getBlockEnd(block)))
+          : state.pasteTargetStartMs;
+
+      return withHistory(
+        state,
+        {
+          blocks: nextBlocks,
+          selectedBlockIds:
+            selectedBlockIds.length > 0 ? selectedBlockIds : state.selectedBlockIds,
+          selectedRowId: movedBlocks[0]?.rowId ?? state.selectedRowId,
+          pasteTargetStartMs: nextPasteTargetStartMs,
+          experimentDurationMs: nextExperimentDurationMs,
+          ...getPlayheadSnapshot(state, nextExperimentDurationMs, nowMs),
+        },
+        options,
+      );
     }),
   deleteBlock: (blockId) =>
     set((state) => {
@@ -1263,27 +1529,35 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
         state.experimentDurationMs,
       );
       const nowMs = Date.now();
-      return {
+      return withHistory(state, {
         blocks: remainingBlocks,
         experimentDurationMs: nextExperimentDurationMs,
         ...getNextSelectionAfterRemoving(state.blocks, blockIdsToDelete),
         ...getPlayheadSnapshot(state, nextExperimentDurationMs, nowMs),
-      };
+      });
     }),
   deleteBlocks: (blockIds) =>
     set((state) => {
       const blockIdSet = new Set(blockIds);
+      if (blockIdSet.size === 0) {
+        return state;
+      }
+
       const remainingBlocks = state.blocks.filter((block) => !blockIdSet.has(block.id));
+      if (remainingBlocks.length === state.blocks.length) {
+        return state;
+      }
+
       const nextExperimentDurationMs = getScheduleDuration(
         remainingBlocks,
         state.experimentDurationMs,
       );
       const nowMs = Date.now();
-      return {
+      return withHistory(state, {
         blocks: remainingBlocks,
         experimentDurationMs: nextExperimentDurationMs,
         ...getNextSelectionAfterRemoving(state.blocks, blockIds),
         ...getPlayheadSnapshot(state, nextExperimentDurationMs, nowMs),
-      };
+      });
     }),
 }));

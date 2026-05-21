@@ -111,9 +111,12 @@ export function TopToolbar({
   );
   const importCalibrationSet = usePumpCalibrationStore((state) => state.importCalibrationSet);
 
-  const zoomIndex = ZOOM_LEVELS.indexOf(zoomPxPerMinute as (typeof ZOOM_LEVELS)[number]);
-  const canZoomOut = zoomIndex > 0;
-  const canZoomIn = zoomIndex >= 0 && zoomIndex < ZOOM_LEVELS.length - 1;
+  const nextZoomOutLevel =
+    [...ZOOM_LEVELS].reverse().find((zoomLevel) => zoomLevel < zoomPxPerMinute - 1) ?? null;
+  const nextZoomInLevel =
+    ZOOM_LEVELS.find((zoomLevel) => zoomLevel > zoomPxPerMinute + 1) ?? null;
+  const canZoomOut = nextZoomOutLevel !== null;
+  const canZoomIn = nextZoomInLevel !== null;
   const panelClassName = "toolbar-panel shrink-0 rounded-2xl border border-border/60 bg-white/72 p-3";
   const zoomPxPerSecond = zoomPxPerMinute / 60;
   const zoomLabel = `${Number.isInteger(zoomPxPerSecond) ? zoomPxPerSecond : zoomPxPerSecond.toFixed(1)} px/s`;
@@ -450,8 +453,8 @@ export function TopToolbar({
                 variant="outline"
                 className="shrink-0"
                 onClick={() => {
-                  if (canZoomOut) {
-                    setZoomPxPerMinute(ZOOM_LEVELS[zoomIndex - 1]);
+                  if (nextZoomOutLevel !== null) {
+                    setZoomPxPerMinute(nextZoomOutLevel);
                   }
                 }}
               >
@@ -469,8 +472,8 @@ export function TopToolbar({
                 variant="outline"
                 className="shrink-0"
                 onClick={() => {
-                  if (canZoomIn) {
-                    setZoomPxPerMinute(ZOOM_LEVELS[zoomIndex + 1]);
+                  if (nextZoomInLevel !== null) {
+                    setZoomPxPerMinute(nextZoomInLevel);
                   }
                 }}
               >

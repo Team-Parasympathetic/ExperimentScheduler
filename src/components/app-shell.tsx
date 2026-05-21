@@ -21,6 +21,8 @@ export function AppShell() {
   const experimentState = useSchedulerStore((state) => state.experimentState);
   const deleteBlocks = useSchedulerStore((state) => state.deleteBlocks);
   const pasteBlocks = useSchedulerStore((state) => state.pasteBlocks);
+  const undo = useSchedulerStore((state) => state.undo);
+  const redo = useSchedulerStore((state) => state.redo);
   const syncPlayhead = useSchedulerStore((state) => state.syncPlayhead);
   const setSelectedBlock = useSchedulerStore((state) => state.setSelectedBlock);
 
@@ -86,6 +88,20 @@ export function AppShell() {
         deleteBlocks(selectedBlockIds);
       }
 
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z" && !isTypingTarget) {
+        event.preventDefault();
+        if (event.shiftKey) {
+          redo();
+        } else {
+          undo();
+        }
+      }
+
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "y" && !isTypingTarget) {
+        event.preventDefault();
+        redo();
+      }
+
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c" && !isTypingTarget) {
         const selectedBlockIdSet = new Set(selectedBlockIds);
         const blocksToCopy = blocks
@@ -112,7 +128,7 @@ export function AppShell() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [blocks, copiedBlocks, deleteBlocks, pasteBlocks, selectedBlockIds]);
+  }, [blocks, copiedBlocks, deleteBlocks, pasteBlocks, redo, selectedBlockIds, undo]);
 
   return (
     <div className="adaptive-shell relative flex h-full flex-col overflow-hidden px-5 pb-5 pt-4 text-foreground">

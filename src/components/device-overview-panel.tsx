@@ -289,9 +289,9 @@ function SlotDetectionWindow({
                 className={cn(
                   "absolute bottom-1 z-20 -translate-x-1/2 rounded-full border px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.12em] shadow-sm",
                   slot.cardType === "pump" &&
-                    "border-orange-200 bg-orange-50/95 text-orange-700",
-                  slot.cardType === "timing" &&
                     "border-cyan-200 bg-cyan-50/95 text-cyan-700",
+                  slot.cardType === "timing" &&
+                    "border-orange-200 bg-orange-50/95 text-orange-700",
                   slot.cardType === "unknown" &&
                     "border-violet-200 bg-violet-50/95 text-violet-700",
                   slot.cardType === "empty" &&
@@ -316,8 +316,8 @@ function SlotDetectionWindow({
             <span
               className={cn(
                 "truncate text-right",
-                slot.cardType === "pump" && "text-orange-700",
-                slot.cardType === "timing" && "text-cyan-700",
+                slot.cardType === "pump" && "text-cyan-700",
+                slot.cardType === "timing" && "text-orange-700",
                 slot.cardType === "unknown" && "text-violet-700",
                 slot.cardType === "empty" && "text-muted-foreground",
               )}

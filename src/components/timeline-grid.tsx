@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState, type RefObject } from "react";
+import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { flushSync } from "react-dom";
 import { RowSidebar } from "@/components/row-sidebar";
 import { TimelineRow } from "@/components/timeline-row";
 import {
@@ -10,10 +11,10 @@ import {
   MAX_ZOOM_PX_PER_MINUTE,
   MIN_ZOOM_PX_PER_MINUTE,
   MIN_BLOCK_DURATION_MS,
-  SECOND_MS,
-  clampBlockStart,
+  formatSecondsPerDivision,
   formatTimelineTime,
   getLabelEvery,
+  getVisibleGridSizeMs,
   msToPx,
   pxToMs,
   snapMs,
@@ -31,6 +32,7 @@ interface DragState {
   originX: number;
   originY: number;
   originBlock: Block;
+  originBlocks: Block[];
   originRow: Row;
   originRowIndex: number;
 }
@@ -63,20 +65,44 @@ export function TimelineGrid({
   const selectedBlockIds = useSchedulerStore((state) => state.selectedBlockIds);
   const addBlock = useSchedulerStore((state) => state.addBlock);
   const updateBlock = useSchedulerStore((state) => state.updateBlock);
+  const moveBlocks = useSchedulerStore((state) => state.moveBlocks);
+  const beginHistoryEntry = useSchedulerStore((state) => state.beginHistoryEntry);
+  const commitHistoryEntry = useSchedulerStore((state) => state.commitHistoryEntry);
   const setSelectedBlock = useSchedulerStore((state) => state.setSelectedBlock);
   const setPasteTarget = useSchedulerStore((state) => state.setPasteTarget);
   const setZoomPxPerMinute = useSchedulerStore((state) => state.setZoomPxPerMinute);
   const [dragState, setDragState] = useState<DragState | null>(null);
   const [panState, setPanState] = useState<PanState | null>(null);
+  const zoomPxPerMinuteRef = useRef(zoomPxPerMinute);
+  const pendingZoomPxPerMinuteRef = useRef<number | null>(null);
+  const zoomFrameRef = useRef<number | null>(null);
+  const zoomAnchorRef = useRef<{
+    timeAtPointerMs: number;
+    trackViewportX: number;
+  } | null>(null);
 
   const timelineWidth = Math.max(msToPx(totalDurationMs, zoomPxPerMinute), 1200);
-  const renderedGridSizeMs = Math.max(gridSizeMs, SECOND_MS);
+  const renderedGridSizeMs = getVisibleGridSizeMs(gridSizeMs, zoomPxPerMinute);
   const labelEvery = getLabelEvery(renderedGridSizeMs, zoomPxPerMinute);
   const tickCount = Math.ceil(totalDurationMs / renderedGridSizeMs) + 1;
+  const secondsPerDivisionLabel = formatSecondsPerDivision(renderedGridSizeMs);
 
   const rowsById = useMemo(
     () => getRowsById(rows),
     [rows],
+  );
+
+  useEffect(() => {
+    zoomPxPerMinuteRef.current = zoomPxPerMinute;
+  }, [zoomPxPerMinute]);
+
+  useEffect(
+    () => () => {
+      if (zoomFrameRef.current !== null) {
+        window.cancelAnimationFrame(zoomFrameRef.current);
+      }
+    },
+    [],
   );
 
   useEffect(() => {
@@ -89,10 +115,22 @@ export function TimelineGrid({
       const rawDeltaMs = pxToMs(event.clientX - dragState.originX, zoomPxPerMinute);
 
       if (dragState.mode === "move") {
-        const nextStartMs = clampBlockStart(
-          snapMs(dragState.originBlock.startMs + rawDeltaMs, gridSizeMs),
-          dragState.originBlock.durationMs,
-          totalDurationMs,
+        const originBlocks =
+          dragState.originBlocks.length > 0
+            ? dragState.originBlocks
+            : [dragState.originBlock];
+        const groupStartMs = Math.min(...originBlocks.map((block) => block.startMs));
+        const groupEndMs = Math.max(
+          ...originBlocks.map((block) => block.startMs + block.durationMs),
+        );
+        const snappedDraggedStartMs = snapMs(
+          dragState.originBlock.startMs + rawDeltaMs,
+          gridSizeMs,
+        );
+        const nextDeltaMs = clamp(
+          snappedDraggedStartMs - dragState.originBlock.startMs,
+          -groupStartMs,
+          totalDurationMs - groupEndMs,
         );
 
         let nextRowId = dragState.originBlock.rowId;
@@ -120,11 +158,14 @@ export function TimelineGrid({
           nextRowId = hoveredRow.id;
         }
 
-        updateBlock(dragState.blockId, {
-          rowId: nextRowId,
-          startMs: nextStartMs,
-        });
-        setSelectedBlock(dragState.blockId);
+        moveBlocks(
+          originBlocks.map((block) => ({
+            blockId: block.id,
+            rowId: nextRowId,
+            startMs: block.startMs + nextDeltaMs,
+          })),
+          { recordHistory: false },
+        );
         return;
       }
 
@@ -136,10 +177,14 @@ export function TimelineGrid({
           endMs - MIN_BLOCK_DURATION_MS,
         );
 
-        updateBlock(dragState.blockId, {
-          startMs: nextStartMs,
-          durationMs: endMs - nextStartMs,
-        });
+        updateBlock(
+          dragState.blockId,
+          {
+            startMs: nextStartMs,
+            durationMs: endMs - nextStartMs,
+          },
+          { recordHistory: false },
+        );
         setSelectedBlock(dragState.blockId);
         return;
       }
@@ -153,13 +198,18 @@ export function TimelineGrid({
         totalDurationMs,
       );
 
-      updateBlock(dragState.blockId, {
-        durationMs: nextEndMs - dragState.originBlock.startMs,
-      });
+      updateBlock(
+        dragState.blockId,
+        {
+          durationMs: nextEndMs - dragState.originBlock.startMs,
+        },
+        { recordHistory: false },
+      );
       setSelectedBlock(dragState.blockId);
     };
 
     const handlePointerUp = () => {
+      commitHistoryEntry();
       setDragState(null);
     };
 
@@ -172,10 +222,10 @@ export function TimelineGrid({
     };
   }, [
     dragState,
+    commitHistoryEntry,
     gridSizeMs,
+    moveBlocks,
     rows,
-    rowsById,
-    scrollRef,
     setSelectedBlock,
     totalDurationMs,
     updateBlock,
@@ -217,8 +267,10 @@ export function TimelineGrid({
         className={`thin-scrollbar h-full overflow-auto ${panState ? "cursor-grabbing select-none" : ""}`}
         onWheel={(event) => {
           const target = event.target as HTMLElement | null;
+          const isOverTimeline = Boolean(target?.closest("[data-main-track='true']"));
+          const isZoomGesture = event.ctrlKey || event.metaKey;
 
-          if (!target?.closest("[data-main-track='true']") || event.deltaY === 0) {
+          if (!isOverTimeline || !isZoomGesture || event.deltaY === 0) {
             return;
           }
 
@@ -227,31 +279,64 @@ export function TimelineGrid({
             return;
           }
 
+          const rect = container.getBoundingClientRect();
+          const trackViewportX = Math.max(0, event.clientX - rect.left - ROW_HEADER_WIDTH);
+          const currentZoomPxPerMinute = zoomPxPerMinuteRef.current;
+          const timeAtPointerMs = pxToMs(
+            container.scrollLeft + trackViewportX,
+            currentZoomPxPerMinute,
+          );
+          const baseZoomPxPerMinute =
+            pendingZoomPxPerMinuteRef.current ?? currentZoomPxPerMinute;
           const nextZoomPxPerMinute = clamp(
-            zoomPxPerMinute * Math.exp(-event.deltaY * 0.006),
+            baseZoomPxPerMinute * Math.exp(-event.deltaY * 0.0036),
             MIN_ZOOM_PX_PER_MINUTE,
             MAX_ZOOM_PX_PER_MINUTE,
           );
 
-          event.preventDefault();
-
-          if (nextZoomPxPerMinute === zoomPxPerMinute) {
+          if (nextZoomPxPerMinute === baseZoomPxPerMinute) {
             return;
           }
 
-          const rect = container.getBoundingClientRect();
-          const trackViewportX = Math.max(0, event.clientX - rect.left - ROW_HEADER_WIDTH);
-          const timeAtPointerMs = pxToMs(
-            container.scrollLeft + trackViewportX,
-            zoomPxPerMinute,
-          );
+          event.preventDefault();
 
-          setZoomPxPerMinute(nextZoomPxPerMinute);
+          pendingZoomPxPerMinuteRef.current = nextZoomPxPerMinute;
+          zoomAnchorRef.current = {
+            timeAtPointerMs,
+            trackViewportX,
+          };
 
-          window.requestAnimationFrame(() => {
+          if (zoomFrameRef.current !== null) {
+            return;
+          }
+
+          zoomFrameRef.current = window.requestAnimationFrame(() => {
+            zoomFrameRef.current = null;
+            const committedZoomPxPerMinute = pendingZoomPxPerMinuteRef.current;
+            const zoomAnchor = zoomAnchorRef.current;
+            pendingZoomPxPerMinuteRef.current = null;
+            zoomAnchorRef.current = null;
+
+            if (
+              committedZoomPxPerMinute === null ||
+              committedZoomPxPerMinute === zoomPxPerMinuteRef.current
+            ) {
+              return;
+            }
+
+            zoomPxPerMinuteRef.current = committedZoomPxPerMinute;
+            flushSync(() => {
+              setZoomPxPerMinute(committedZoomPxPerMinute);
+            });
+
+            if (!zoomAnchor) {
+              return;
+            }
+
             container.scrollLeft = Math.max(
               0,
-              msToPx(timeAtPointerMs, nextZoomPxPerMinute) - trackViewportX,
+              msToPx(zoomAnchor.timeAtPointerMs, committedZoomPxPerMinute) -
+                zoomAnchor.trackViewportX,
             );
           });
         }}
@@ -323,6 +408,9 @@ export function TimelineGrid({
                 width: timelineWidth,
               }}
             >
+              <div className="pointer-events-none sticky left-3 top-2 z-30 inline-flex rounded-full border border-border/70 bg-white/85 px-2 py-0.5 font-mono text-[10px] font-semibold text-muted-foreground shadow-sm backdrop-blur">
+                {secondsPerDivisionLabel}
+              </div>
               <div
                 className="pointer-events-none absolute top-2 z-20 h-3 w-3 -translate-x-1/2 rounded-full border-2 border-white bg-rose-500 shadow-[0_6px_18px_rgba(244,63,94,0.35)]"
                 style={{
@@ -392,16 +480,31 @@ export function TimelineGrid({
                       return;
                     }
                     const originRowIndex = rows.findIndex((item) => item.id === originRow.id);
+                    const shouldDragSelectedBatch =
+                      mode === "move" && selectedBlockIds.includes(block.id);
+                    const selectedBlockIdSet = new Set(selectedBlockIds);
+                    const originBlocks = shouldDragSelectedBatch
+                      ? blocks
+                          .filter((item) => selectedBlockIdSet.has(item.id))
+                          .sort(
+                            (left, right) =>
+                              left.startMs - right.startMs || left.id.localeCompare(right.id),
+                          )
+                      : [block];
 
                     event.preventDefault();
                     event.stopPropagation();
-                    setSelectedBlock(blockId);
+                    beginHistoryEntry();
+                    if (!shouldDragSelectedBatch) {
+                      setSelectedBlock(blockId);
+                    }
                     setDragState({
                       blockId,
                       mode,
                       originX: event.clientX,
                       originY: event.clientY,
                       originBlock: block,
+                      originBlocks,
                       originRow,
                       originRowIndex: Math.max(0, originRowIndex),
                     });

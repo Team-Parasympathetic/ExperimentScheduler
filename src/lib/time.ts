@@ -19,16 +19,38 @@ export const GRID_OPTIONS = [
   { label: "1 min", value: 60_000 },
 ];
 
-export const MIN_ZOOM_PX_PER_MINUTE = 6_000;
+export const MIN_ZOOM_PX_PER_MINUTE = 1_200;
 export const MAX_ZOOM_PX_PER_MINUTE = 24_000;
 export const ZOOM_LEVELS = [
   MIN_ZOOM_PX_PER_MINUTE,
+  1_800,
+  3_000,
+  6_000,
   9_000,
   12_000,
   18_000,
   MAX_ZOOM_PX_PER_MINUTE,
 ] as const;
-export const DEFAULT_ZOOM_PX_PER_MINUTE = MIN_ZOOM_PX_PER_MINUTE;
+export const DEFAULT_ZOOM_PX_PER_MINUTE = 6_000;
+
+const GRID_DIVISION_OPTIONS_MS = [
+  100,
+  250,
+  500,
+  1_000,
+  2_000,
+  5_000,
+  10_000,
+  15_000,
+  30_000,
+  MINUTE_MS,
+  2 * MINUTE_MS,
+  5 * MINUTE_MS,
+  10 * MINUTE_MS,
+  15 * MINUTE_MS,
+  30 * MINUTE_MS,
+  60 * MINUTE_MS,
+] as const;
 
 function trimTrailingZeros(value: string) {
   return value.replace(/\.0+$/, "").replace(/(\.\d*[1-9])0+$/, "$1");
@@ -126,6 +148,29 @@ export function getScheduleDuration(blocks: Block[], requestedDurationMs?: numbe
 export function getLabelEvery(gridSizeMs: number, zoomPxPerMinute: number) {
   const gridWidth = msToPx(gridSizeMs, zoomPxPerMinute);
   return Math.max(1, Math.ceil(90 / Math.max(gridWidth, 1)));
+}
+
+export function getVisibleGridSizeMs(gridSizeMs: number, zoomPxPerMinute: number) {
+  const minGridWidthPx = 26;
+  const minimumDivisionMs = Math.max(100, gridSizeMs);
+  const visibleDivisionMs = GRID_DIVISION_OPTIONS_MS.find(
+    (divisionMs) =>
+      divisionMs >= minimumDivisionMs &&
+      msToPx(divisionMs, zoomPxPerMinute) >= minGridWidthPx,
+  );
+
+  if (visibleDivisionMs) {
+    return visibleDivisionMs;
+  }
+
+  const minDivisionMs = pxToMs(minGridWidthPx, zoomPxPerMinute);
+  return Math.ceil(minDivisionMs / MINUTE_MS) * MINUTE_MS;
+}
+
+export function formatSecondsPerDivision(ms: number) {
+  const seconds = ms / SECOND_MS;
+
+  return `${trimTrailingZeros(seconds.toFixed(seconds < 10 && seconds % 1 !== 0 ? 1 : 0))} s/div`;
 }
 
 export function clampBlockStart(startMs: number, durationMs: number, totalDurationMs: number) {
