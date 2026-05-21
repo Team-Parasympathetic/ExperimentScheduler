@@ -53,10 +53,10 @@ export function SchedulerSidebar({
   const [activeView, setActiveView] = useState<SidebarView>("devices");
 
   return (
-    <div className="thin-scrollbar min-h-0 overflow-y-auto pr-1">
+    <div className="thin-scrollbar h-full min-h-0 overflow-y-auto pr-1">
       <div
         className={cn(
-          "min-h-full",
+          "h-full min-h-0",
           collapsed ? "flex justify-end" : "grid grid-rows-[auto,minmax(0,1fr)] gap-2",
         )}
       >
@@ -100,7 +100,7 @@ export function SchedulerSidebar({
         </Card>
 
         {collapsed ? null : (
-          <div className="min-h-0 pb-1">
+          <div className="h-full min-h-0 pb-1">
             {activeView === "inspector" ? (
               <InspectorPanel />
             ) : activeView === "devices" ? (

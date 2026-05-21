@@ -261,7 +261,7 @@ export function TimelineGrid({
   }, [panState, scrollRef]);
 
   return (
-    <div className="glass-panel min-h-0 overflow-hidden rounded-[28px] border border-border/70 shadow-panel">
+    <div className="glass-panel h-full min-h-0 overflow-hidden rounded-[28px] border border-border/70 shadow-panel">
       <div
         ref={scrollRef}
         className={`thin-scrollbar h-full overflow-auto ${panState ? "cursor-grabbing select-none" : ""}`}

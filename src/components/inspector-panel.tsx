@@ -84,7 +84,7 @@ export function InspectorPanel() {
             </p>
           </div>
         ) : (
-          <div className="thin-scrollbar flex-1 space-y-4 overflow-auto pr-1">
+          <div className="thin-scrollbar min-h-0 flex-1 space-y-4 overflow-auto pr-1">
             <div className="rounded-2xl border border-border/60 bg-white/72 p-4">
               <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-muted-foreground">
                 Current Selection

@@ -139,7 +139,7 @@ export function SchedulerLayout({
         onDismissContextMenu={onDismissContextMenu}
         onOpenBlockContextMenu={onOpenBlockContextMenu}
       />
-      <div className="relative min-w-0">
+      <div className="relative min-h-0 min-w-0 overflow-hidden">
         <button
           aria-label="Resize sidebar"
           className={cn(
