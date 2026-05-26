@@ -271,6 +271,7 @@ export function BlockContextMenu({ blockId, x, y, onClose }: BlockContextMenuPro
               <div className="relative">
                 <DraftNumberInput
                   id="menu-flow-rate"
+                  className="pr-20"
                   min={0}
                   minValue={0}
                   step="10"
@@ -282,7 +283,7 @@ export function BlockContextMenu({ blockId, x, y, onClose }: BlockContextMenuPro
                     })
                   }
                 />
-                <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
+                <span className="pointer-events-none absolute right-8 top-1/2 -translate-y-1/2 text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
                   uL/min
                 </span>
               </div>

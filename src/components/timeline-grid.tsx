@@ -48,6 +48,7 @@ interface TimelineGridProps {
   totalDurationMs: number;
   scrollRef: RefObject<HTMLDivElement>;
   onOpenBlockContextMenu: (blockId: string, x: number, y: number) => void;
+  onOpenInsertContextMenu: (rowId: string, timeMs: number, x: number, y: number) => void;
   onDismissContextMenu: () => void;
 }
 
@@ -56,6 +57,7 @@ export function TimelineGrid({
   scrollRef,
   onDismissContextMenu,
   onOpenBlockContextMenu,
+  onOpenInsertContextMenu,
 }: TimelineGridProps) {
   const rows = useSchedulerStore((state) => state.rows);
   const blocks = useSchedulerStore((state) => state.blocks);
@@ -512,6 +514,9 @@ export function TimelineGrid({
                     addBlock(row.id, snapMs(timeMs, gridSizeMs));
                   }}
                   onOpenContextMenu={onOpenBlockContextMenu}
+                  onOpenInsertMenu={(rowId, timeMs, x, y) => {
+                    onOpenInsertContextMenu(rowId, snapMs(timeMs, gridSizeMs), x, y);
+                  }}
                   onSetPasteTarget={(rowId, timeMs) => {
                     setSelectedBlock(null);
                     setPasteTarget(rowId, snapMs(timeMs, gridSizeMs));

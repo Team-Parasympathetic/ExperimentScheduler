@@ -20,7 +20,7 @@ export const GRID_OPTIONS = [
 ];
 
 export const MIN_ZOOM_PX_PER_MINUTE = 1_200;
-export const MAX_ZOOM_PX_PER_MINUTE = 24_000;
+export const MAX_ZOOM_PX_PER_MINUTE = 48_000;
 export const ZOOM_LEVELS = [
   MIN_ZOOM_PX_PER_MINUTE,
   1_800,
@@ -29,6 +29,8 @@ export const ZOOM_LEVELS = [
   9_000,
   12_000,
   18_000,
+  24_000,
+  36_000,
   MAX_ZOOM_PX_PER_MINUTE,
 ] as const;
 export const DEFAULT_ZOOM_PX_PER_MINUTE = 6_000;

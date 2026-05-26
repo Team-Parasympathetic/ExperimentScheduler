@@ -259,6 +259,7 @@ export function InspectorPanel() {
                   <div className="relative">
                     <DraftNumberInput
                       id="inspector-flow-rate"
+                      className="pr-20"
                       min={0}
                       minValue={0}
                       step="10"
@@ -270,7 +271,7 @@ export function InspectorPanel() {
                         })
                       }
                     />
-                    <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs uppercase tracking-[0.2em] text-muted-foreground">
+                    <span className="pointer-events-none absolute right-8 top-1/2 -translate-y-1/2 text-xs uppercase tracking-[0.16em] text-muted-foreground">
                       uL/min
                     </span>
                   </div>

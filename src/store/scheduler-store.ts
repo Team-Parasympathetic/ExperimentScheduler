@@ -202,10 +202,35 @@ function normalizeTimeValue(value: number | undefined, fallback: number, minimum
   return Math.max(minimum, Math.round(value));
 }
 
+function blocksDoNotOverlapByRow(blocks: Block[]) {
+  const blocksByRowId = new Map<string, Block[]>();
+
+  for (const block of blocks) {
+    const rowBlocks = blocksByRowId.get(block.rowId) ?? [];
+    rowBlocks.push(block);
+    blocksByRowId.set(block.rowId, rowBlocks);
+  }
+
+  for (const rowBlocks of blocksByRowId.values()) {
+    const sortedBlocks = [...rowBlocks].sort(
+      (left, right) => left.startMs - right.startMs || left.id.localeCompare(right.id),
+    );
+
+    for (let index = 1; index < sortedBlocks.length; index += 1) {
+      if (sortedBlocks[index].startMs < getBlockEnd(sortedBlocks[index - 1])) {
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
 function isWithinEditableScheduleLimits(blocks: Block[], rows: Row[]) {
   const summary = getFirmwareScheduleSummary(blocks, rows);
 
   return (
+    blocksDoNotOverlapByRow(blocks) &&
     summary.rowsWithinLimit &&
     summary.eventsWithinLimit &&
     summary.actionBytesWithinLimit &&
@@ -296,21 +321,43 @@ function getNextPumpHardwareId(
 }
 
 function assignPumpRowsByDetectedHardware(rows: Row[], availablePumpHardwareIds: number[]) {
-  if (availablePumpHardwareIds.length === 0) {
-    return rows.map((row) =>
-      row.deviceType === "peristaltic" ? { ...row, hardwareId: null } : row,
-    );
-  }
-
-  let pumpRowIndex = 0;
+  const usedPumpIds = new Set(
+    rows
+      .filter(
+        (row) =>
+          row.deviceType === "peristaltic" &&
+          row.hardwareId !== null &&
+          row.hardwareId !== undefined,
+      )
+      .map((row) => row.hardwareId as number),
+  );
+  let nextAvailableIndex = 0;
 
   return rows.map((row) => {
     if (row.deviceType !== "peristaltic") {
       return row;
     }
 
-    const hardwareId = availablePumpHardwareIds[pumpRowIndex] ?? null;
-    pumpRowIndex += 1;
+    // Detection can be retried/remounted often; preserve explicit channel choices.
+    if (row.hardwareId !== null && row.hardwareId !== undefined) {
+      return row;
+    }
+
+    while (
+      nextAvailableIndex < availablePumpHardwareIds.length &&
+      usedPumpIds.has(availablePumpHardwareIds[nextAvailableIndex])
+    ) {
+      nextAvailableIndex += 1;
+    }
+
+    const hardwareId = availablePumpHardwareIds[nextAvailableIndex] ?? null;
+
+    if (hardwareId === null) {
+      return row;
+    }
+
+    usedPumpIds.add(hardwareId);
+    nextAvailableIndex += 1;
 
     return {
       ...row,
@@ -557,6 +604,7 @@ function findClosestAvailableStartMs({
   blocks,
   rowId,
   ignoredBlockId,
+  ignoredBlockIds,
   desiredStartMs,
   durationMs,
   maxStartMs,
@@ -565,6 +613,7 @@ function findClosestAvailableStartMs({
   blocks: Block[];
   rowId: string;
   ignoredBlockId?: string;
+  ignoredBlockIds?: Set<string>;
   desiredStartMs: number;
   durationMs: number;
   maxStartMs: number;
@@ -572,7 +621,15 @@ function findClosestAvailableStartMs({
 }) {
   const clampedMaxStartMs = Math.max(0, maxStartMs);
   const targetStartMs = clamp(desiredStartMs, 0, clampedMaxStartMs);
-  const rowBlocks = getSortedRowBlocks(blocks, rowId, ignoredBlockId);
+  const ignoredIds = new Set(ignoredBlockIds);
+
+  if (ignoredBlockId) {
+    ignoredIds.add(ignoredBlockId);
+  }
+
+  const rowBlocks = blocks
+    .filter((block) => block.rowId === rowId && !ignoredIds.has(block.id))
+    .sort((left, right) => left.startMs - right.startMs || left.id.localeCompare(right.id));
   const availableIntervals: Array<{ startMs: number; endMs: number }> = [];
 
   let cursorMs = 0;
@@ -596,7 +653,7 @@ function findClosestAvailableStartMs({
   }
 
   if (availableIntervals.length === 0) {
-    return targetStartMs;
+    return null;
   }
 
   let bestStartMs = availableIntervals[0].startMs;
@@ -626,19 +683,24 @@ function findClosestAvailableStartMs({
 function findAvailableStartMs({
   blocks,
   rowId,
+  ignoredBlockIds,
   desiredStartMs,
   durationMs,
   maxStartMs,
 }: {
   blocks: Block[];
   rowId: string;
+  ignoredBlockIds?: Set<string>;
   desiredStartMs: number;
   durationMs: number;
   maxStartMs: number;
 }) {
   const clampedMaxStartMs = Math.max(0, maxStartMs);
   const targetStartMs = clamp(desiredStartMs, 0, clampedMaxStartMs);
-  const rowBlocks = getSortedRowBlocks(blocks, rowId);
+  const ignoredIds = ignoredBlockIds ?? new Set<string>();
+  const rowBlocks = blocks
+    .filter((block) => block.rowId === rowId && !ignoredIds.has(block.id))
+    .sort((left, right) => left.startMs - right.startMs || left.id.localeCompare(right.id));
   const availableIntervals: Array<{ startMs: number; endMs: number }> = [];
   let cursorMs = 0;
 
@@ -1289,12 +1351,24 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
         return state;
       }
 
-      const rowBlocks = getSortedRowBlocks(state.blocks, rowId);
-      const lastBlock = rowBlocks[rowBlocks.length - 1];
+      const normalizedDurationMs = Math.max(MIN_BLOCK_DURATION_MS, Math.round(durationMs));
+      const maxStartMs = Math.max(0, state.experimentDurationMs - normalizedDurationMs);
+      const nextStartMs = findAvailableStartMs({
+        blocks: state.blocks,
+        rowId,
+        desiredStartMs: Math.max(0, startMs),
+        durationMs: normalizedDurationMs,
+        maxStartMs,
+      });
+
+      if (nextStartMs === null) {
+        return state;
+      }
+
       const newBlock = createDefaultBlock(
         row,
-        lastBlock ? getBlockEnd(lastBlock) : Math.max(0, startMs),
-        durationMs,
+        nextStartMs,
+        normalizedDurationMs,
       );
       const nextBlocks = [...state.blocks, newBlock];
 
@@ -1399,7 +1473,7 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
             durationMs: nextDurationMs,
             maxStartMs,
             snapThresholdMs: state.gridSizeMs / 2,
-          });
+          }) ?? block.startMs;
         }
 
         const isTriggerBlock = requestedRow?.deviceType === "trigger";
@@ -1454,11 +1528,18 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
       }
 
       const updatesByBlockId = new Map(updates.map((update) => [update.blockId, update]));
-      const nextBlocks = state.blocks.map((block) => {
+      const movingBlockIds = new Set(updatesByBlockId.keys());
+      const moveGroups = new Map<
+        string,
+        Array<{ block: Block; requestedStartMs: number }>
+      >();
+      const unchangedMovingBlockIds = new Set<string>();
+
+      for (const block of state.blocks) {
         const update = updatesByBlockId.get(block.id);
 
         if (!update) {
-          return block;
+          continue;
         }
 
         const currentRow = state.rows.find((row) => row.id === block.rowId);
@@ -1470,17 +1551,60 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
           requestedRow.isScheduleStatus ||
           requestedRow.deviceType !== currentRow.deviceType
         ) {
+          unchangedMovingBlockIds.add(block.id);
+          continue;
+        }
+
+        const group = moveGroups.get(requestedRow.id) ?? [];
+        group.push({
+          block,
+          requestedStartMs: normalizeTimeValue(update.startMs, block.startMs, 0),
+        });
+        moveGroups.set(requestedRow.id, group);
+      }
+
+      const resolvedMoves = new Map<string, { rowId: string; startMs: number }>();
+
+      for (const [rowId, group] of moveGroups) {
+        const groupStartMs = Math.min(...group.map((item) => item.block.startMs));
+        const groupEndMs = Math.max(...group.map((item) => getBlockEnd(item.block)));
+        const groupDurationMs = Math.max(MIN_BLOCK_DURATION_MS, groupEndMs - groupStartMs);
+        const desiredGroupStartMs = Math.min(...group.map((item) => item.requestedStartMs));
+        const maxStartMs = Math.max(0, state.experimentDurationMs - groupDurationMs);
+        const nextGroupStartMs = findClosestAvailableStartMs({
+          blocks: state.blocks,
+          rowId,
+          ignoredBlockIds: movingBlockIds,
+          desiredStartMs: desiredGroupStartMs,
+          durationMs: groupDurationMs,
+          maxStartMs,
+          snapThresholdMs: state.gridSizeMs / 2,
+        });
+
+        if (nextGroupStartMs === null) {
+          group.forEach((item) => unchangedMovingBlockIds.add(item.block.id));
+          continue;
+        }
+
+        for (const item of group) {
+          resolvedMoves.set(item.block.id, {
+            rowId,
+            startMs: nextGroupStartMs + (item.block.startMs - groupStartMs),
+          });
+        }
+      }
+
+      const nextBlocks = state.blocks.map((block) => {
+        const resolvedMove = resolvedMoves.get(block.id);
+
+        if (!resolvedMove || unchangedMovingBlockIds.has(block.id)) {
           return block;
         }
 
         return {
           ...block,
-          rowId: requestedRow.id,
-          startMs: clamp(
-            normalizeTimeValue(update.startMs, block.startMs, 0),
-            0,
-            Math.max(0, state.experimentDurationMs - block.durationMs),
-          ),
+          rowId: resolvedMove.rowId,
+          startMs: resolvedMove.startMs,
         };
       });
 

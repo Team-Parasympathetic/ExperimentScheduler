@@ -15,6 +15,7 @@ interface SchedulerLayoutProps {
   totalDurationMs: number;
   scrollRef: RefObject<HTMLDivElement>;
   onOpenBlockContextMenu: (blockId: string, x: number, y: number) => void;
+  onOpenInsertContextMenu: (rowId: string, timeMs: number, x: number, y: number) => void;
   onDismissContextMenu: () => void;
 }
 
@@ -53,6 +54,7 @@ export function SchedulerLayout({
   scrollRef,
   totalDurationMs,
   onOpenBlockContextMenu,
+  onOpenInsertContextMenu,
   onDismissContextMenu,
 }: SchedulerLayoutProps) {
   const layoutRef = useRef<HTMLDivElement>(null);
@@ -138,6 +140,7 @@ export function SchedulerLayout({
         totalDurationMs={totalDurationMs}
         onDismissContextMenu={onDismissContextMenu}
         onOpenBlockContextMenu={onOpenBlockContextMenu}
+        onOpenInsertContextMenu={onOpenInsertContextMenu}
       />
       <div className="relative min-h-0 min-w-0 overflow-hidden">
         <button

@@ -24,6 +24,7 @@ interface TimelineRowProps {
   ) => void;
   onSetPasteTarget: (rowId: string, timeMs: number) => void;
   onOpenContextMenu: (blockId: string, x: number, y: number) => void;
+  onOpenInsertMenu: (rowId: string, timeMs: number, x: number, y: number) => void;
   onCreateBlock: (timeMs: number) => void;
   onBlockPointerDown: (
     blockId: string,
@@ -40,6 +41,7 @@ export function TimelineRow({
   onBlockPointerDown,
   onCreateBlock,
   onOpenContextMenu,
+  onOpenInsertMenu,
   onSelectBlock,
   onSetPasteTarget,
   selectedBlockIds,
@@ -72,6 +74,23 @@ export function TimelineRow({
         const offsetX = event.clientX - rect.left;
         const timeMs = Math.max(0, Math.min(totalDurationMs, pxToMs(offsetX, zoomPxPerMinute)));
         onCreateBlock(timeMs);
+      }}
+      onContextMenu={(event) => {
+        if (isScheduleStatus) {
+          return;
+        }
+
+        const target = event.target as HTMLElement | null;
+        if (target?.closest("[data-block-root='true']")) {
+          return;
+        }
+
+        event.preventDefault();
+        event.stopPropagation();
+        const rect = event.currentTarget.getBoundingClientRect();
+        const offsetX = event.clientX - rect.left;
+        const timeMs = Math.max(0, Math.min(totalDurationMs, pxToMs(offsetX, zoomPxPerMinute)));
+        onOpenInsertMenu(row.id, timeMs, event.clientX, event.clientY);
       }}
       onPointerDown={(event) => {
         if (event.button !== 0 || isScheduleStatus) {
