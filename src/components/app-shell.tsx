@@ -5,7 +5,9 @@ import { SchedulerLayout } from "@/components/scheduler-layout";
 import { TopToolbar } from "@/components/top-toolbar";
 import { Button } from "@/components/ui/button";
 import { ROW_HEADER_WIDTH } from "@/lib/layout";
-import { formatTimelineTime, msToPx, pxToMs } from "@/lib/time";
+import { stopBoardSchedule } from "@/lib/board-api";
+import { formatTimelineTime, getRequiredScheduleDuration, msToPx, pxToMs } from "@/lib/time";
+import { useBoardStore } from "@/store/board-store";
 import { useSchedulerStore } from "@/store/scheduler-store";
 import type { Block } from "@/types/scheduler";
 
@@ -95,6 +97,10 @@ function InsertBlockContextMenu({
 }
 
 export function AppShell() {
+  const comPort = useBoardStore((state) => state.comPort);
+  const appendSerialLog = useBoardStore((state) => state.appendSerialLog);
+  const setScheduleCommandState = useBoardStore((state) => state.setScheduleCommandState);
+  const setScheduleMessage = useBoardStore((state) => state.setScheduleMessage);
   const addBlock = useSchedulerStore((state) => state.addBlock);
   const selectedBlockIds = useSchedulerStore((state) => state.selectedBlockIds);
   const blocks = useSchedulerStore((state) => state.blocks);
@@ -104,12 +110,14 @@ export function AppShell() {
   const playheadMs = useSchedulerStore((state) => state.playheadMs);
   const deleteBlocks = useSchedulerStore((state) => state.deleteBlocks);
   const pasteBlocks = useSchedulerStore((state) => state.pasteBlocks);
+  const stopExperiment = useSchedulerStore((state) => state.stopExperiment);
   const undo = useSchedulerStore((state) => state.undo);
   const redo = useSchedulerStore((state) => state.redo);
   const syncPlayhead = useSchedulerStore((state) => state.syncPlayhead);
   const setSelectedBlock = useSchedulerStore((state) => state.setSelectedBlock);
 
   const scrollRef = useRef<HTMLDivElement>(null);
+  const autoStopRequestedRef = useRef(false);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [insertMenu, setInsertMenu] = useState<InsertMenuState | null>(null);
   const [copiedBlocks, setCopiedBlocks] = useState<Block[]>([]);
@@ -141,6 +149,7 @@ export function AppShell() {
 
   useEffect(() => {
     if (experimentState !== "running") {
+      autoStopRequestedRef.current = false;
       return;
     }
 
@@ -157,6 +166,51 @@ export function AppShell() {
       window.cancelAnimationFrame(animationFrameId);
     };
   }, [experimentState, syncPlayhead]);
+
+  useEffect(() => {
+    if (experimentState !== "running") {
+      autoStopRequestedRef.current = false;
+      return;
+    }
+
+    const finalBlockEndMs = getRequiredScheduleDuration(blocks);
+
+    if (playheadMs < finalBlockEndMs || autoStopRequestedRef.current) {
+      return;
+    }
+
+    autoStopRequestedRef.current = true;
+    stopExperiment();
+
+    const trimmedComPort = comPort.trim();
+    setScheduleCommandState("stop");
+    setScheduleMessage(`Auto-stop in progress on ${trimmedComPort || "COM port"}...`);
+
+    void stopBoardSchedule(trimmedComPort)
+      .then((result) => {
+        appendSerialLog(result.log, `# Auto-stop ${trimmedComPort || "COM port"}`);
+        setScheduleMessage(
+          result.ok ? `Schedule complete. ${result.message}` : `Auto-stop failed: ${result.message}`,
+        );
+      })
+      .catch((error) => {
+        setScheduleMessage(
+          `Auto-stop failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      })
+      .finally(() => {
+        setScheduleCommandState(null);
+      });
+  }, [
+    appendSerialLog,
+    blocks,
+    comPort,
+    experimentState,
+    playheadMs,
+    setScheduleCommandState,
+    setScheduleMessage,
+    stopExperiment,
+  ]);
 
   useEffect(() => {
     if (experimentState !== "running") {

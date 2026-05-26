@@ -120,7 +120,7 @@ export function ScheduleBlock({
       : getFlowRateLabel(block.flowRate);
   const durationLabel = formatDuration(block.durationMs);
   const deviceTypeLabel = getDeviceTypeLabel(deviceType);
-  const contentWidth = Math.max(0, width - 34);
+  const contentWidth = Math.max(0, width - 40);
   const resizeHandleWidth = Math.round(
     width < 24 ? Math.min(7, Math.max(4, width * 0.28)) : Math.min(18, Math.max(14, width * 0.28)),
   );
@@ -203,11 +203,11 @@ export function ScheduleBlock({
           </div>
 
           {showFooter ? (
-            <div className="pointer-events-none flex items-center justify-between gap-3 text-xs">
-              <div className="truncate rounded-full border border-white/60 bg-white/72 px-2.5 py-1 font-medium text-slate-700">
+            <div className="pointer-events-none flex min-w-0 items-center justify-between gap-2 text-xs">
+              <div className="max-w-[calc(100%-3.2rem)] shrink truncate rounded-full border border-white/60 bg-white/72 px-2 py-0.5 font-medium text-slate-700">
                 {secondaryLabel}
               </div>
-              <div className="truncate font-mono text-slate-500">
+              <div className="shrink-0 truncate font-mono text-slate-500">
                 {durationLabel}
               </div>
             </div>

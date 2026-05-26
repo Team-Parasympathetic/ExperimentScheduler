@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Cpu, ListChecks, PanelsTopLeft, Terminal } from "lucide-react";
+import { Cpu, ListChecks, PanelsTopLeft, Terminal, X } from "lucide-react";
 import backplaneImage from "@/assets/backplane.png";
 import pumpCardImage from "@/assets/pump-control-card.png";
 import timingCardImage from "@/assets/timing-card.png";
@@ -168,6 +168,18 @@ function DeviceDetectionControls({
   const isDetected = detectionState === "detected";
   const isDetecting = detectionState === "detecting";
   const isDetectionDisabled = isDetecting || isBoardLocked;
+  const [showReconnectHint, setShowReconnectHint] = useState(false);
+
+  useEffect(() => {
+    if (detectionState === "not-detected" && detectionMessage) {
+      setShowReconnectHint(true);
+      return;
+    }
+
+    if (detectionState === "detecting" || detectionState === "detected") {
+      setShowReconnectHint(false);
+    }
+  }, [detectionMessage, detectionState]);
 
   return (
     <section className="rounded-lg border border-border/60 bg-white/72 p-3">
@@ -206,14 +218,29 @@ function DeviceDetectionControls({
             }}
           />
         </div>
-        <Button
-          className="self-end"
-          disabled={isDetectionDisabled}
-          title={isBoardLocked ? `Detection is paused while ${lockReason}.` : undefined}
-          onClick={onDetect}
-        >
-          {isBoardLocked ? "Locked" : isDetecting ? "Detecting" : "Detect"}
-        </Button>
+        <div className="relative self-end">
+          {showReconnectHint ? (
+            <div className="absolute bottom-[calc(100%+0.75rem)] right-0 z-20 w-64 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 pr-8 text-xs font-medium text-amber-900 shadow-[0_16px_42px_-28px_rgba(120,53,15,0.5)]">
+              <button
+                aria-label="Dismiss detection hint"
+                className="absolute right-2 top-2 rounded-md p-0.5 text-amber-700 transition hover:bg-amber-100 hover:text-amber-950"
+                type="button"
+                onClick={() => setShowReconnectHint(false)}
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+              Reconnect USB cable if detection fails after power cycle
+              <span className="absolute -bottom-2 right-6 h-4 w-4 rotate-45 border-b border-r border-amber-200 bg-amber-50" />
+            </div>
+          ) : null}
+          <Button
+            disabled={isDetectionDisabled}
+            title={isBoardLocked ? `Detection is paused while ${lockReason}.` : undefined}
+            onClick={onDetect}
+          >
+            {isBoardLocked ? "Locked" : isDetecting ? "Detecting" : "Detect"}
+          </Button>
+        </div>
       </div>
 
       {detectionMessage ? (
