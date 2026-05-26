@@ -108,6 +108,33 @@ export function TimelineGrid({
   );
 
   useEffect(() => {
+    const container = scrollRef.current;
+
+    if (!container) {
+      return;
+    }
+
+    const handleWheelCapture = (event: WheelEvent) => {
+      const target = event.target as HTMLElement | null;
+
+      if (target?.closest("[data-main-track='true']")) {
+        event.preventDefault();
+      }
+    };
+
+    container.addEventListener("wheel", handleWheelCapture, {
+      capture: true,
+      passive: false,
+    });
+
+    return () => {
+      container.removeEventListener("wheel", handleWheelCapture, {
+        capture: true,
+      });
+    };
+  }, [scrollRef]);
+
+  useEffect(() => {
     if (!dragState) {
       return;
     }
@@ -391,13 +418,13 @@ export function TimelineGrid({
           </div>
 
           <div
-            className="sticky top-0 z-30 grid border-b border-border/70 bg-[linear-gradient(180deg,rgba(255,255,255,0.96),rgba(246,250,252,0.92))] backdrop-blur"
+            className="sticky top-0 z-50 grid border-b border-border/70 bg-[linear-gradient(180deg,rgba(255,255,255,0.96),rgba(246,250,252,0.92))] backdrop-blur"
             style={{
               gridTemplateColumns: `${ROW_HEADER_WIDTH}px ${timelineWidth}px`,
               height: TIME_RULER_HEIGHT,
             }}
           >
-            <div className="sticky left-0 z-40 flex items-center border-r border-border/70 bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(246,250,252,0.96))] px-4">
+            <div className="sticky left-0 z-[60] flex items-center border-r border-border/70 bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(246,250,252,0.96))] px-4">
               <div>
                 <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-muted-foreground">
                   Device Channels

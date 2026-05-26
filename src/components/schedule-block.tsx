@@ -150,7 +150,8 @@ export function ScheduleBlock({
           : isAlternateShade
             ? "border-orange-300 bg-[linear-gradient(180deg,rgba(255,237,213,0.98),rgba(253,186,116,0.92))] text-slate-800"
             : "border-orange-200 bg-[linear-gradient(180deg,rgba(255,247,237,0.98),rgba(254,215,170,0.92))] text-slate-800",
-        isSelected && "ring-2 ring-primary/55",
+        isSelected &&
+          "shadow-[0_0_0_1px_rgba(14,165,233,0.42),0_0_18px_rgba(14,165,233,0.48),0_0_34px_rgba(14,165,233,0.28)]",
       )}
       style={{
         left,
