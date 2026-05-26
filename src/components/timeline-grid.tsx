@@ -268,9 +268,8 @@ export function TimelineGrid({
         onWheel={(event) => {
           const target = event.target as HTMLElement | null;
           const isOverTimeline = Boolean(target?.closest("[data-main-track='true']"));
-          const isZoomGesture = event.ctrlKey || event.metaKey;
 
-          if (!isOverTimeline || !isZoomGesture || event.deltaY === 0) {
+          if (!isOverTimeline || event.deltaY === 0) {
             return;
           }
 

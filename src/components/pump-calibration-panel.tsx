@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  Droplet,
   FlaskConical,
   FolderOpen,
   Play,
@@ -27,10 +28,10 @@ import {
   getFixedPumpCalibrationFit,
   getFixedPumpFlowRateForDuration,
   getFixedPumpVolumeForDuration,
-  getCalibrationPointVoltage,
   getPumpCalibrationFit,
   DEFAULT_PUMP_FLOW_UL_PER_MIN_PER_VOLT,
   MAX_PUMP_VOLTAGE,
+  MIN_CALIBRATION_VOLTAGE,
   MIN_CALIBRATION_POINTS,
   type PumpCalibrationSetFile,
 } from "@/lib/pump-calibration";
@@ -53,6 +54,7 @@ import { useSchedulerStore } from "@/store/scheduler-store";
 import type { Block, Direction } from "@/types/scheduler";
 
 const CALIBRATION_START_DELAY_MS = 350;
+const PRIME_VOLTAGE = 2.5;
 
 function formatNumber(value: number, digits = 2) {
   return value.toLocaleString(undefined, {
@@ -114,6 +116,7 @@ export function PumpCalibrationPanel() {
   const statusMessage = usePumpCalibrationStore((state) => state.statusMessage);
   const setVMax = usePumpCalibrationStore((state) => state.setVMax);
   const setPointCount = usePumpCalibrationStore((state) => state.setPointCount);
+  const setPointVoltage = usePumpCalibrationStore((state) => state.setPointVoltage);
   const setPointMeasuredFlow = usePumpCalibrationStore((state) => state.setPointMeasuredFlow);
   const setFixedPointCount = usePumpCalibrationStore((state) => state.setFixedPointCount);
   const setFixedPointDurationMs = usePumpCalibrationStore(
@@ -265,11 +268,20 @@ export function PumpCalibrationPanel() {
     }
   };
 
-  const runCalibration = async () => {
+  const runPumpPulse = async ({
+    kind,
+    voltage,
+  }: {
+    kind: "calibration" | "prime";
+    voltage: number;
+  }) => {
     const selectedRow = peristalticRows.find((row) => row.id === selectedRunRowId);
+    const isPrime = kind === "prime";
+    const pulseLabel = isPrime ? "prime" : "calibration";
+    const pulseTitle = isPrime ? "Prime" : "Calibration";
 
     if (isMainScheduleRunning) {
-      setStatusMessage("Stop the main schedule before running calibration.");
+      setStatusMessage(`Stop the main schedule before running ${pulseLabel}.`);
       return;
     }
 
@@ -288,7 +300,7 @@ export function PumpCalibrationPanel() {
       direction: runDirection,
       flowRate: isFixedRatePump
         ? encodePumpVoltageAsFirmwareFlowRate(MAX_PUMP_VOLTAGE)
-        : encodePumpVoltageAsFirmwareFlowRate(runVoltage, vMax),
+        : encodePumpVoltageAsFirmwareFlowRate(voltage, vMax),
     };
 
     calibrationRunIdRef.current = runId;
@@ -296,10 +308,10 @@ export function PumpCalibrationPanel() {
     setScheduleCommandState("upload");
     setStatusMessage(
       isFixedRatePump
-        ? `Uploading ${selectedRow.name} fixed-rate calibration pulse.`
-        : `Uploading ${selectedRow.name} calibration pulse at ${formatVoltage(runVoltage)}.`,
+        ? `Uploading ${selectedRow.name} fixed-rate ${pulseLabel} pulse.`
+        : `Uploading ${selectedRow.name} ${pulseLabel} pulse at ${formatVoltage(voltage)}.`,
     );
-    setScheduleMessage(`Calibration upload in progress on ${trimmedComPort || "COM port"}...`);
+    setScheduleMessage(`${pulseTitle} upload in progress on ${trimmedComPort || "COM port"}...`);
 
     try {
       const uploadResult = await uploadBoardSchedule({
@@ -308,7 +320,7 @@ export function PumpCalibrationPanel() {
         blocks: [calibrationBlock],
       });
 
-      appendSerialLog(uploadResult.log, `# Calibration upload ${trimmedComPort || "COM port"}`);
+      appendSerialLog(uploadResult.log, `# ${pulseTitle} upload ${trimmedComPort || "COM port"}`);
 
       if (!uploadResult.ok) {
         setStatusMessage(`Failed: ${uploadResult.message}`);
@@ -316,7 +328,7 @@ export function PumpCalibrationPanel() {
         return;
       }
 
-      setStatusMessage("Calibration schedule uploaded.");
+      setStatusMessage(`${pulseTitle} schedule uploaded.`);
       setScheduleMessage(uploadResult.message);
       await delay(CALIBRATION_START_DELAY_MS);
 
@@ -325,15 +337,15 @@ export function PumpCalibrationPanel() {
       }
 
       setScheduleCommandState("start");
-      setStatusMessage("Starting calibration pulse.");
-      setScheduleMessage(`Calibration start in progress on ${trimmedComPort || "COM port"}...`);
+      setStatusMessage(`Starting ${pulseLabel} pulse.`);
+      setScheduleMessage(`${pulseTitle} start in progress on ${trimmedComPort || "COM port"}...`);
 
       const startResult = await startBoardSchedule(trimmedComPort);
 
-      appendSerialLog(startResult.log, `# Calibration start ${trimmedComPort || "COM port"}`);
+      appendSerialLog(startResult.log, `# ${pulseTitle} start ${trimmedComPort || "COM port"}`);
       setStatusMessage(
         startResult.ok
-          ? `${selectedRow.name} running for ${formatNumber(runDurationMs / 1_000, 1)} s.`
+          ? `${selectedRow.name} ${pulseLabel} running for ${formatNumber(runDurationMs / 1_000, 1)} s.`
           : `Failed: ${startResult.message}`,
       );
       setScheduleMessage(startResult.ok ? startResult.message : `Failed: ${startResult.message}`);
@@ -343,7 +355,7 @@ export function PumpCalibrationPanel() {
         await delay(runDurationMs);
 
         if (runId === calibrationRunIdRef.current) {
-          setStatusMessage("Calibration pulse complete.");
+          setStatusMessage(`${pulseTitle} pulse complete.`);
         }
       }
     } catch (error) {
@@ -356,6 +368,20 @@ export function PumpCalibrationPanel() {
         setCalibrationRunning(false);
       }
     }
+  };
+
+  const runCalibration = async () => {
+    await runPumpPulse({
+      kind: "calibration",
+      voltage: runVoltage,
+    });
+  };
+
+  const runPrime = async () => {
+    await runPumpPulse({
+      kind: "prime",
+      voltage: Math.min(PRIME_VOLTAGE, vMax),
+    });
   };
 
   const stopCalibration = async () => {
@@ -546,6 +572,7 @@ export function PumpCalibrationPanel() {
                   <div className="relative">
                     <DraftNumberInput
                       id="calibration-duration"
+                      className="pr-10"
                       disabled={isMainScheduleRunning}
                       min={0.5}
                       minValue={0.5}
@@ -554,7 +581,7 @@ export function PumpCalibrationPanel() {
                       value={runDurationMs / 1_000}
                       onCommit={(value) => setRunDurationMs(value * 1_000)}
                     />
-                    <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs uppercase tracking-[0.18em] text-muted-foreground">
+                    <span className="pointer-events-none absolute right-8 top-1/2 -translate-y-1/2 text-xs uppercase tracking-[0.18em] text-muted-foreground">
                       s
                     </span>
                   </div>
@@ -570,8 +597,8 @@ export function PumpCalibrationPanel() {
                         disabled={isMainScheduleRunning}
                         max={vMax}
                         maxValue={vMax}
-                        min={0}
-                        minValue={0}
+                        min={MIN_CALIBRATION_VOLTAGE}
+                        minValue={MIN_CALIBRATION_VOLTAGE}
                         step={0.05}
                         type="number"
                         value={runVoltage}
@@ -585,7 +612,7 @@ export function PumpCalibrationPanel() {
                 ) : null}
               </div>
 
-              <div className="grid gap-4 sm:grid-cols-2 2xl:grid-cols-[minmax(160px,0.9fr),minmax(190px,1fr),minmax(190px,1fr)]">
+              <div className="grid gap-4 sm:grid-cols-2 2xl:grid-cols-[minmax(160px,0.85fr),minmax(150px,0.8fr),minmax(190px,1fr),minmax(190px,1fr)]">
                 <div className="min-w-0 space-y-2 sm:col-span-2 2xl:col-span-1">
                   <Label htmlFor="calibration-direction">Direction</Label>
                   <Select
@@ -600,6 +627,23 @@ export function PumpCalibrationPanel() {
                     <option value="reverse">Reverse</option>
                   </Select>
                 </div>
+
+                <Button
+                  className="w-full self-end"
+                  disabled={!canRunCalibration}
+                  title={
+                    isMainScheduleRunning
+                      ? "Stop the main schedule before priming"
+                      : isFixedRatePump
+                      ? "Prime the selected fixed-rate pump"
+                      : `Prime the selected pump at ${formatVoltage(Math.min(PRIME_VOLTAGE, vMax))}`
+                  }
+                  variant="secondary"
+                  onClick={runPrime}
+                >
+                  <Droplet className="h-4 w-4" />
+                  {isMainScheduleRunning ? "Locked" : isBoardBusy ? "Running" : "Prime"}
+                </Button>
 
                 <Button
                   className="w-full self-end"
@@ -733,8 +777,8 @@ export function PumpCalibrationPanel() {
                         id="calibration-vmax"
                         max={MAX_PUMP_VOLTAGE}
                         maxValue={MAX_PUMP_VOLTAGE}
-                        min={0}
-                        minValue={Number.EPSILON}
+                        min={MIN_CALIBRATION_VOLTAGE}
+                        minValue={MIN_CALIBRATION_VOLTAGE}
                         step={0.05}
                         type="number"
                         value={vMax}
@@ -761,43 +805,52 @@ export function PumpCalibrationPanel() {
                 </div>
 
                 <div className="mt-4 overflow-hidden rounded-lg border border-border/60">
-                  <div className="grid grid-cols-[52px,minmax(72px,0.8fr),minmax(120px,1.2fr)] bg-slate-50/90 px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                  <div className="grid grid-cols-[52px,minmax(108px,0.95fr),minmax(120px,1.05fr)] bg-slate-50/90 px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
                     <div>Point</div>
                     <div>Voltage</div>
                     <div>Measured Flow</div>
                   </div>
                   <div className="divide-y divide-border/60">
-                    {points.map((point, index) => {
-                      const voltage = getCalibrationPointVoltage(index, points.length, vMax);
-
-                      return (
-                        <div
-                          key={point.id}
-                          className="grid grid-cols-[52px,minmax(72px,0.8fr),minmax(120px,1.2fr)] items-center gap-2 px-3 py-2"
-                        >
-                          <div className="text-xs font-semibold text-muted-foreground">
-                            {index + 1}
-                          </div>
-                          <div className="font-mono text-xs text-foreground">
-                            {formatNumber(voltage, 3)}
-                          </div>
-                          <div className="relative">
-                            <NullableDraftNumberInput
-                              className="h-8 pr-16 text-xs"
-                              min={0}
-                              minValue={0}
-                              step={1}
-                              type="number"
-                              value={point.measuredFlowRate}
-                              onCommit={(value) => setPointMeasuredFlow(point.id, value)}
-                            />
-                            <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
-                              uL/min
-                            </span>
-                          </div>
+                    {points.map((point, index) => (
+                      <div
+                        key={point.id}
+                        className="grid grid-cols-[52px,minmax(108px,0.95fr),minmax(120px,1.05fr)] items-center gap-2 px-3 py-2"
+                      >
+                        <div className="text-xs font-semibold text-muted-foreground">
+                          {index + 1}
                         </div>
-                      );
-                    })}
+                        <div className="relative">
+                          <DraftNumberInput
+                            className="h-8 pr-10 text-xs"
+                            max={vMax}
+                            maxValue={vMax}
+                            min={MIN_CALIBRATION_VOLTAGE}
+                            minValue={MIN_CALIBRATION_VOLTAGE}
+                            step={0.05}
+                            type="number"
+                            value={point.voltage}
+                            onCommit={(value) => setPointVoltage(point.id, value)}
+                          />
+                          <span className="pointer-events-none absolute right-8 top-1/2 -translate-y-1/2 text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+                            V
+                          </span>
+                        </div>
+                        <div className="relative">
+                          <NullableDraftNumberInput
+                            className="h-8 pr-16 text-xs"
+                            min={0}
+                            minValue={0}
+                            step={1}
+                            type="number"
+                            value={point.measuredFlowRate}
+                            onCommit={(value) => setPointMeasuredFlow(point.id, value)}
+                          />
+                          <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+                            uL/min
+                          </span>
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 </div>
               </>

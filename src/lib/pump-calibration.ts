@@ -2,6 +2,7 @@ import { clamp } from "@/lib/utils";
 import type { Block, PumpRateMode, Row } from "@/types/scheduler";
 
 export const MAX_PUMP_VOLTAGE = 5;
+export const MIN_CALIBRATION_VOLTAGE = 0.001;
 export const MIN_CALIBRATION_POINTS = 2;
 export const DEFAULT_CALIBRATION_POINTS = 5;
 export const DEFAULT_CALIBRATION_DURATION_MS = 10_000;
@@ -10,6 +11,7 @@ export const DEFAULT_FIXED_PUMP_FLOW_UL_PER_MIN = 400;
 
 export interface PumpCalibrationPoint {
   id: string;
+  voltage: number;
   measuredFlowRate: number | null;
 }
 
@@ -77,7 +79,7 @@ export function normalizePumpVMax(value: number) {
     return MAX_PUMP_VOLTAGE;
   }
 
-  return clamp(value, 0, MAX_PUMP_VOLTAGE);
+  return clamp(value, MIN_CALIBRATION_VOLTAGE, MAX_PUMP_VOLTAGE);
 }
 
 export function normalizeCalibrationPointCount(value: number) {
@@ -90,19 +92,47 @@ export function normalizeCalibrationPointCount(value: number) {
 
 export function getCalibrationPointVoltage(index: number, pointCount: number, vMax: number) {
   const normalizedPointCount = normalizeCalibrationPointCount(pointCount);
+  const normalizedVMax = normalizePumpVMax(vMax);
 
-  if (normalizedPointCount <= 1) {
-    return 0;
+  if (normalizedPointCount <= 0 || normalizedVMax <= 0) {
+    return MIN_CALIBRATION_VOLTAGE;
   }
 
-  return (normalizePumpVMax(vMax) * index) / (normalizedPointCount - 1);
+  return Math.max(
+    MIN_CALIBRATION_VOLTAGE,
+    (normalizedVMax * (index + 1)) / normalizedPointCount,
+  );
 }
 
-export function createCalibrationPoints(pointCount = DEFAULT_CALIBRATION_POINTS) {
+export function normalizeCalibrationPointVoltage(
+  value: number | null | undefined,
+  vMax: number,
+  fallback: number | null | undefined,
+) {
+  const normalizedVMax = normalizePumpVMax(vMax);
+  const upperLimit = Math.max(MIN_CALIBRATION_VOLTAGE, normalizedVMax);
+  const fallbackVoltage = Number.isFinite(fallback)
+    ? Number(fallback)
+    : MIN_CALIBRATION_VOLTAGE;
+
+  const numericValue = Number(value);
+
+  if (!Number.isFinite(numericValue)) {
+    return clamp(fallbackVoltage, MIN_CALIBRATION_VOLTAGE, upperLimit);
+  }
+
+  return clamp(Number(numericValue.toFixed(3)), MIN_CALIBRATION_VOLTAGE, upperLimit);
+}
+
+export function createCalibrationPoints(
+  pointCount = DEFAULT_CALIBRATION_POINTS,
+  vMax = MAX_PUMP_VOLTAGE,
+) {
   return Array.from(
     { length: normalizeCalibrationPointCount(pointCount) },
     (_, index): PumpCalibrationPoint => ({
       id: `cal-point-${index + 1}`,
+      voltage: getCalibrationPointVoltage(index, pointCount, vMax),
       measuredFlowRate: null,
     }),
   );
@@ -146,9 +176,14 @@ export function normalizeVariablePumpCalibrationConfig(
   const sourcePoints =
     Array.isArray(calibration?.points) && calibration.points.length >= MIN_CALIBRATION_POINTS
       ? calibration.points
-      : createCalibrationPoints(DEFAULT_CALIBRATION_POINTS);
+      : createCalibrationPoints(DEFAULT_CALIBRATION_POINTS, vMax);
   const points = sourcePoints.map((point, index) => ({
     id: typeof point.id === "string" && point.id ? point.id : `cal-point-${index + 1}`,
+    voltage: normalizeCalibrationPointVoltage(
+      point.voltage,
+      vMax,
+      getCalibrationPointVoltage(index, sourcePoints.length, vMax),
+    ),
     measuredFlowRate:
       point.measuredFlowRate === null || point.measuredFlowRate === undefined
         ? null
@@ -162,7 +197,7 @@ export function normalizeVariablePumpCalibrationConfig(
     points:
       points.length >= MIN_CALIBRATION_POINTS
         ? points
-        : createCalibrationPoints(MIN_CALIBRATION_POINTS),
+        : createCalibrationPoints(MIN_CALIBRATION_POINTS, vMax),
   };
 }
 
@@ -214,8 +249,8 @@ export function getPumpCalibrationFit({
   vMax,
 }: VariablePumpCalibrationConfig): PumpCalibrationFit {
   const usablePoints = points
-    .map((point, index) => ({
-      voltage: getCalibrationPointVoltage(index, points.length, vMax),
+    .map((point) => ({
+      voltage: normalizeCalibrationPointVoltage(point.voltage, vMax, point.voltage),
       flowRate: point.measuredFlowRate,
     }))
     .filter(

@@ -388,6 +388,11 @@ export function DeviceOverviewPanel() {
   const [detectionMessage, setDetectionMessage] = useState("");
   const [slots, setSlots] = useState<SlotDetection[]>(() => getEmptySlotDetection());
   const summary = getFirmwareScheduleSummary(blocks, rows);
+  const overviewStatusLabel = summary.isWithinLimits
+    ? "Within Limits"
+    : !summary.hardwareAssignmentsComplete
+    ? "Unassigned hardware"
+    : "Limit Hit";
   const isDeviceDetected = detectionState === "detected";
   const isMainScheduleRunning = experimentState === "running";
   const boardLockReason = isMainScheduleRunning
@@ -506,7 +511,7 @@ export function DeviceOverviewPanel() {
                 : "border-rose-200 bg-rose-50 text-rose-700"
             }
           >
-            {summary.isWithinLimits ? "Within Limits" : "Limit Hit"}
+            {overviewStatusLabel}
           </Badge>
         </div>
 
@@ -574,7 +579,7 @@ export function DeviceOverviewPanel() {
                     ? summary.hardwareAssignmentsUnique
                       ? "Complete"
                       : "Duplicate"
-                    : "Missing"
+                    : "Unassigned hardware"
                 }
                 isOk={summary.hardwareAssignmentsComplete && summary.hardwareAssignmentsUnique}
               />

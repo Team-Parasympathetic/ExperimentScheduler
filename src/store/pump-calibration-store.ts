@@ -1,9 +1,11 @@
 import { create } from "zustand";
 import {
   DEFAULT_CALIBRATION_DURATION_MS,
+  createCalibrationPoints,
   createFixedCalibrationPoints,
   createDefaultPumpCalibrationConfig,
   normalizeCalibrationPointCount,
+  normalizeCalibrationPointVoltage,
   normalizeFixedPumpCalibrationConfig,
   normalizeFixedPumpDurationMs,
   normalizePumpCalibrationConfig,
@@ -30,6 +32,7 @@ interface PumpCalibrationState {
   statusMessage: string;
   setVMax: (vMax: number) => void;
   setPointCount: (pointCount: number) => void;
+  setPointVoltage: (pointId: string, voltage: number) => void;
   setPointMeasuredFlow: (pointId: string, measuredFlowRate: number | null) => void;
   setFixedPointCount: (pointCount: number) => void;
   setFixedPointDurationMs: (pointId: string, durationMs: number) => void;
@@ -119,15 +122,33 @@ export const usePumpCalibrationStore = create<PumpCalibrationState>((set) => ({
   setPointCount: (pointCount) =>
     set((state) => {
       const nextPointCount = normalizeCalibrationPointCount(pointCount);
+      const defaultPoints = createCalibrationPoints(nextPointCount, state.vMax);
       const nextPoints = Array.from({ length: nextPointCount }, (_, index) => {
-        return (
-          state.points[index] ?? {
-            id: `cal-point-${index + 1}`,
-            measuredFlowRate: null,
-          }
-        );
+        return state.points[index] ?? defaultPoints[index];
       });
 
+      const variable = normalizeVariablePumpCalibrationConfig({
+        vMax: state.vMax,
+        points: nextPoints,
+      });
+      const calibration = normalizePumpCalibrationConfig({
+        ...(state.runRowId ? state.calibrationsByRowId[state.runRowId] : undefined),
+        variable,
+        fixed: { points: state.fixedPoints },
+      });
+
+      return withActiveCalibration(state, calibration);
+    }),
+  setPointVoltage: (pointId, voltage) =>
+    set((state) => {
+      const nextPoints = state.points.map((point) =>
+        point.id === pointId
+          ? {
+              ...point,
+              voltage: normalizeCalibrationPointVoltage(voltage, state.vMax, point.voltage),
+            }
+          : point,
+      );
       const variable = normalizeVariablePumpCalibrationConfig({
         vMax: state.vMax,
         points: nextPoints,
