@@ -271,7 +271,14 @@ export function TimelineGrid({
           const target = event.target as HTMLElement | null;
           const isOverTimeline = Boolean(target?.closest("[data-main-track='true']"));
 
-          if (!isOverTimeline || event.deltaY === 0) {
+          if (!isOverTimeline) {
+            return;
+          }
+
+          event.preventDefault();
+          event.stopPropagation();
+
+          if (event.deltaY === 0) {
             return;
           }
 
@@ -298,8 +305,6 @@ export function TimelineGrid({
           if (nextZoomPxPerMinute === baseZoomPxPerMinute) {
             return;
           }
-
-          event.preventDefault();
 
           pendingZoomPxPerMinuteRef.current = nextZoomPxPerMinute;
           zoomAnchorRef.current = {
