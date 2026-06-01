@@ -54,7 +54,7 @@ export function TimelineRow({
 
   return (
     <div
-      className="relative cursor-grab"
+      className="relative h-full cursor-grab"
       data-main-track="true"
       data-pan-track="true"
       style={{

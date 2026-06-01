@@ -8,7 +8,7 @@ import {
   getFixedPumpCalibrationFit,
   getFixedPumpFlowRateForDuration,
   getFixedPumpVolumeForDuration,
-  normalizePumpCalibrationConfig,
+  getPumpCalibrationConfigForRow,
 } from "@/lib/pump-calibration";
 import {
   DEFAULT_TRIGGER_MODE,
@@ -86,12 +86,10 @@ export function ScheduleBlock({
   shadeIndex,
   width,
 }: ScheduleBlockProps) {
-  const storedCalibration = usePumpCalibrationStore(
-    (state) => state.calibrationsByRowId[block.rowId],
-  );
+  const calibrationsByRowId = usePumpCalibrationStore((state) => state.calibrationsByRowId);
   const calibration = useMemo(
-    () => normalizePumpCalibrationConfig(storedCalibration),
-    [storedCalibration],
+    () => getPumpCalibrationConfigForRow(calibrationsByRowId, row),
+    [calibrationsByRowId, row],
   );
   const fixedFit = getFixedPumpCalibrationFit(calibration.fixed);
   const deviceType = row.deviceType;
@@ -131,18 +129,24 @@ export function ScheduleBlock({
     showHeader &&
     contentWidth >=
       Math.max(
-        164,
-        getEstimatedTextWidth(secondaryLabel, 6.7) +
-          getEstimatedTextWidth(durationLabel, 7) +
-          34,
+        132,
+        getEstimatedTextWidth(secondaryLabel, 5.2) +
+          getEstimatedTextWidth(durationLabel, 6) +
+          28,
       );
+  const showDuration = showHeader && contentWidth >= 70;
+  const leftTextRightInset = isTrigger && width >= 56 ? 44 : 12;
+  const badgeRightOffset = isTrigger && width >= 56 ? 40 : 12;
+  const badgeMaxWidth = isTrigger && width >= 56
+    ? "min(7.2rem, 44%)"
+    : "min(9.5rem, 52%)";
 
   return (
     <div
       data-block-root="true"
       className={cn(
-        "absolute top-2 flex h-[76px] min-w-0 touch-none select-none flex-col justify-between overflow-visible rounded-2xl border text-left shadow-[0_16px_32px_-22px_rgba(15,23,42,0.28)] transition-colors",
-        showHeader ? "cursor-grab px-4 py-3 active:cursor-grabbing" : "cursor-grab p-0 active:cursor-grabbing",
+        "absolute top-1.5 flex h-[52px] min-w-0 touch-none select-none flex-col justify-between overflow-visible rounded-xl border text-left shadow-[0_14px_28px_-22px_rgba(15,23,42,0.28)] transition-colors",
+        showHeader ? "cursor-grab px-3 py-2 active:cursor-grabbing" : "cursor-grab p-0 active:cursor-grabbing",
         isTrigger
           ? isAlternateShade
             ? "border-violet-300 bg-[linear-gradient(180deg,rgba(237,233,254,0.98),rgba(196,181,253,0.92))] text-slate-800"
@@ -170,7 +174,7 @@ export function ScheduleBlock({
     >
       <div
         data-block-resize-handle="start"
-        className="absolute -left-1 inset-y-0 z-20 cursor-ew-resize rounded-l-2xl bg-white/0 transition hover:bg-slate-900/8"
+        className="absolute -left-1 inset-y-0 z-20 cursor-ew-resize rounded-l-xl bg-white/0 transition hover:bg-slate-900/8"
         style={{ width: resizeHandleWidth }}
         onPointerDown={(event) => {
           event.stopPropagation();
@@ -179,7 +183,7 @@ export function ScheduleBlock({
       />
       <div
         data-block-resize-handle="end"
-        className="absolute -right-1 inset-y-0 z-20 cursor-ew-resize rounded-r-2xl bg-white/0 transition hover:bg-slate-900/8"
+        className="absolute -right-1 inset-y-0 z-20 cursor-ew-resize rounded-r-xl bg-white/0 transition hover:bg-slate-900/8"
         style={{ width: resizeHandleWidth }}
         onPointerDown={(event) => {
           event.stopPropagation();
@@ -191,24 +195,36 @@ export function ScheduleBlock({
 
       {showHeader ? (
         <>
-          <div className="pointer-events-none flex items-start justify-between gap-3 pr-6">
-            <div className="min-w-0">
-              <div className="truncate text-[10px] font-semibold uppercase tracking-[0.22em] text-slate-500">
+          <div
+            className="pointer-events-none absolute left-3 top-2 flex min-w-0 flex-col"
+            style={{ right: leftTextRightInset }}
+          >
+              <div className="truncate text-[9px] font-semibold uppercase leading-[1.05] tracking-[0.18em] text-slate-500">
                 {getDeviceTypeLabel(deviceType)}
               </div>
-              <div className="mt-1 truncate text-sm font-semibold">
+              <div className="mt-1 truncate text-xs font-semibold leading-[1.05]">
                 {primaryLabel}
               </div>
-            </div>
+              {showDuration ? (
+                <div className="mt-0.5 max-w-[42%] truncate font-mono text-[9px] leading-none text-slate-500">
+                  {durationLabel}
+                </div>
+              ) : null}
           </div>
 
           {showFooter ? (
-            <div className="pointer-events-none flex min-w-0 items-center justify-between gap-2 text-xs">
-              <div className="max-w-[calc(100%-3.2rem)] shrink truncate rounded-full border border-white/60 bg-white/72 px-2 py-0.5 font-medium text-slate-700">
+            <div
+              className="pointer-events-none absolute bottom-2 flex items-center justify-end overflow-hidden text-[9px] leading-none"
+              style={{
+                maxWidth: badgeMaxWidth,
+                right: badgeRightOffset,
+              }}
+            >
+              <div
+                className="min-w-0 truncate rounded-full border border-white/60 bg-white/72 px-1.5 py-0.5 font-medium text-slate-700"
+                style={{ maxWidth: "min(9.5rem, 100%)" }}
+              >
                 {secondaryLabel}
-              </div>
-              <div className="shrink-0 truncate font-mono text-slate-500">
-                {durationLabel}
               </div>
             </div>
           ) : null}

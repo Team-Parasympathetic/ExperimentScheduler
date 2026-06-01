@@ -62,6 +62,85 @@ export interface PumpCalibrationSetFile {
   calibrationsByRowId: PumpCalibrationConfigByRowId;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizeStringMap(value: unknown): Record<string, string> {
+  if (!isRecord(value)) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(value).filter(
+      (entry): entry is [string, string] =>
+        typeof entry[0] === "string" && typeof entry[1] === "string",
+    ),
+  );
+}
+
+function looksLikeSinglePumpCalibration(value: unknown) {
+  return isRecord(value) && ("variable" in value || "fixed" in value || "vMax" in value || "points" in value);
+}
+
+export function getPumpCalibrationKeyForHardwareId(hardwareId: number) {
+  return `hardware:${Math.max(0, Math.round(hardwareId))}`;
+}
+
+export function getPumpCalibrationKeyForRow(row: Row) {
+  return row.deviceType === "peristaltic" &&
+    row.hardwareId !== null &&
+    row.hardwareId !== undefined &&
+    Number.isFinite(row.hardwareId)
+    ? getPumpCalibrationKeyForHardwareId(row.hardwareId)
+    : row.id;
+}
+
+function getPumpCalibrationKeyForRowId(rowId: string, rows: Row[] = []) {
+  const row = rows.find((item) => item.id === rowId);
+  return row ? getPumpCalibrationKeyForRow(row) : rowId;
+}
+
+export function migratePumpCalibrationsToHardwareKeys(
+  calibrationsByRowId: PumpCalibrationConfigByRowId,
+  rows: Row[] = [],
+): PumpCalibrationConfigByRowId {
+  const entries: Array<[string, PumpCalibrationConfig]> = [];
+
+  for (const [rowId, calibration] of Object.entries(calibrationsByRowId)) {
+    const calibrationKey = getPumpCalibrationKeyForRowId(rowId, rows);
+    const existingIndex = entries.findIndex(([key]) => key === calibrationKey);
+
+    if (existingIndex >= 0 && calibrationKey !== rowId) {
+      continue;
+    }
+
+    if (existingIndex >= 0) {
+      entries[existingIndex] = [calibrationKey, normalizePumpCalibrationConfig(calibration)];
+      continue;
+    }
+
+    entries.push([calibrationKey, normalizePumpCalibrationConfig(calibration)]);
+  }
+
+  return Object.fromEntries(entries);
+}
+
+export function getPumpCalibrationConfigForRow(
+  calibrationsByRowId: PumpCalibrationConfigByRowId,
+  row: Row | null | undefined,
+) {
+  if (!row) {
+    return createDefaultPumpCalibrationConfig();
+  }
+
+  return normalizePumpCalibrationConfig(
+    calibrationsByRowId[getPumpCalibrationKeyForRow(row)] ??
+      calibrationsByRowId[row.id] ??
+      createDefaultPumpCalibrationConfig(),
+  );
+}
+
 export function normalizePumpRateMode(value: unknown): PumpRateMode {
   return value === "fixed" ? "fixed" : "variable";
 }
@@ -241,6 +320,80 @@ export function normalizePumpCalibrationConfig(
   return {
     variable: normalizeVariablePumpCalibrationConfig(calibration?.variable ?? legacyVariable),
     fixed: normalizeFixedPumpCalibrationConfig(calibration?.fixed),
+  };
+}
+
+export function normalizePumpCalibrationSetFile(
+  file: unknown,
+  rows: Row[] = [],
+): PumpCalibrationSetFile {
+  const record = isRecord(file) ? file : {};
+  const sourceCalibrations = isRecord(record.calibrationsByRowId)
+    ? record.calibrationsByRowId
+    : {};
+  let calibrationsByRowId = Object.fromEntries(
+    Object.entries(sourceCalibrations).map(([rowId, calibration]) => [
+      rowId,
+      normalizePumpCalibrationConfig(
+        calibration as Partial<PumpCalibrationConfig & VariablePumpCalibrationConfig>,
+      ),
+    ]),
+  );
+
+  const singleCalibration =
+    looksLikeSinglePumpCalibration(record)
+      ? record
+      : looksLikeSinglePumpCalibration(record.calibration)
+        ? record.calibration
+        : null;
+
+  if (Object.keys(calibrationsByRowId).length === 0 && singleCalibration) {
+    const legacyRowId =
+      typeof record.activeRowId === "string"
+        ? record.activeRowId
+        : typeof record.rowId === "string"
+          ? record.rowId
+          : "legacy-pump";
+    calibrationsByRowId = {
+      [legacyRowId]: normalizePumpCalibrationConfig(
+        singleCalibration as Partial<PumpCalibrationConfig & VariablePumpCalibrationConfig>,
+      ),
+    };
+  }
+
+  calibrationsByRowId = migratePumpCalibrationsToHardwareKeys(calibrationsByRowId, rows);
+
+  const channelNamesByRowId = Object.fromEntries(
+    Object.entries(normalizeStringMap(record.channelNamesByRowId)).map(([rowId, name]) => [
+      getPumpCalibrationKeyForRowId(rowId, rows),
+      name,
+    ]),
+  );
+
+  if (
+    Object.keys(channelNamesByRowId).length === 0 &&
+    typeof record.rowName === "string" &&
+    Object.keys(calibrationsByRowId).length === 1
+  ) {
+    channelNamesByRowId[Object.keys(calibrationsByRowId)[0]] = record.rowName;
+  }
+
+  const activeRowIdFromFile =
+    typeof record.activeRowId === "string"
+      ? getPumpCalibrationKeyForRowId(record.activeRowId, rows)
+      : null;
+  const activeRowId =
+    activeRowIdFromFile && calibrationsByRowId[activeRowIdFromFile]
+      ? activeRowIdFromFile
+      : Object.keys(calibrationsByRowId)[0] ?? null;
+
+  return {
+    kind: "pumpCalibrationSet",
+    schemaVersion: 1,
+    savedAt: typeof record.savedAt === "string" ? record.savedAt : new Date().toISOString(),
+    activeRowId,
+    channelNamesByRowId,
+    calibrationsByRowId,
   };
 }
 
@@ -438,7 +591,6 @@ export function applyPumpCalibrationToBlocksByRowId(
   calibrationsByRowId: PumpCalibrationConfigByRowId,
 ) {
   const rowsById = new Map(rows.map((row) => [row.id, row]));
-  const defaultCalibration = createDefaultPumpCalibrationConfig();
 
   return blocks.map((block) => {
     const row = rowsById.get(block.rowId);
@@ -447,9 +599,7 @@ export function applyPumpCalibrationToBlocksByRowId(
       return block;
     }
 
-    const calibration = normalizePumpCalibrationConfig(
-      calibrationsByRowId[block.rowId] ?? defaultCalibration,
-    );
+    const calibration = getPumpCalibrationConfigForRow(calibrationsByRowId, row);
 
     if (normalizePumpRateMode(row.pumpRateMode) === "fixed") {
       return {
@@ -471,33 +621,55 @@ export function applyPumpCalibrationToBlocksByRowId(
 export function createPumpCalibrationSetFile({
   activeRowId,
   calibrationsByRowId,
+  existingFile,
   rows,
 }: {
   activeRowId: string | null;
   calibrationsByRowId: PumpCalibrationConfigByRowId;
+  existingFile?: unknown;
   rows: Row[];
 }): PumpCalibrationSetFile {
-  const channelNamesByRowId = Object.fromEntries(
+  const existingCalibrationSet = normalizePumpCalibrationSetFile(existingFile, rows);
+  const currentChannelNamesByRowId = Object.fromEntries(
     rows
       .filter((row) => row.deviceType === "peristaltic")
-      .map((row) => [row.id, row.name]),
+      .map((row) => [getPumpCalibrationKeyForRow(row), row.name]),
   );
+  const currentRowIds = Object.keys(currentChannelNamesByRowId);
+  const currentCalibrationsByRowId = migratePumpCalibrationsToHardwareKeys(
+    calibrationsByRowId,
+    rows,
+  );
+  const nextCalibrationsByRowId: PumpCalibrationConfigByRowId = Object.fromEntries(
+    Object.entries({
+      ...existingCalibrationSet.calibrationsByRowId,
+      ...currentCalibrationsByRowId,
+    }).map(([rowId, calibration]) => [rowId, normalizePumpCalibrationConfig(calibration)]),
+  );
+
+  for (const rowId of currentRowIds) {
+    nextCalibrationsByRowId[rowId] = normalizePumpCalibrationConfig(
+      nextCalibrationsByRowId[rowId] ?? createDefaultPumpCalibrationConfig(),
+    );
+  }
+
+  const nextActiveRowId =
+    activeRowId && nextCalibrationsByRowId[getPumpCalibrationKeyForRowId(activeRowId, rows)]
+      ? getPumpCalibrationKeyForRowId(activeRowId, rows)
+      : existingCalibrationSet.activeRowId &&
+          nextCalibrationsByRowId[existingCalibrationSet.activeRowId]
+        ? existingCalibrationSet.activeRowId
+        : Object.keys(nextCalibrationsByRowId)[0] ?? null;
 
   return {
     kind: "pumpCalibrationSet",
     schemaVersion: 1,
     savedAt: new Date().toISOString(),
-    activeRowId,
-    channelNamesByRowId,
-    calibrationsByRowId: Object.fromEntries(
-      rows
-        .filter((row) => row.deviceType === "peristaltic")
-        .map((row) => [
-          row.id,
-          normalizePumpCalibrationConfig(
-            calibrationsByRowId[row.id] ?? createDefaultPumpCalibrationConfig(),
-          ),
-        ]),
-    ),
+    activeRowId: nextActiveRowId,
+    channelNamesByRowId: {
+      ...existingCalibrationSet.channelNamesByRowId,
+      ...currentChannelNamesByRowId,
+    },
+    calibrationsByRowId: nextCalibrationsByRowId,
   };
 }

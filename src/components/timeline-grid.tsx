@@ -11,8 +11,10 @@ import {
   MAX_ZOOM_PX_PER_MINUTE,
   MIN_ZOOM_PX_PER_MINUTE,
   MIN_BLOCK_DURATION_MS,
+  formatDuration,
   formatSecondsPerDivision,
   formatTimelineTime,
+  getBlockEnd,
   getLabelEvery,
   getVisibleGridSizeMs,
   msToPx,
@@ -42,6 +44,14 @@ interface PanState {
   originY: number;
   scrollLeft: number;
   scrollTop: number;
+}
+
+interface DistanceGuide {
+  distanceMs: number;
+  draggedRowIndex: number;
+  targetRowIndex: number;
+  startMs: number;
+  endMs: number;
 }
 
 interface TimelineGridProps {
@@ -88,6 +98,77 @@ export function TimelineGrid({
   const labelEvery = getLabelEvery(renderedGridSizeMs, zoomPxPerMinute);
   const tickCount = Math.ceil(totalDurationMs / renderedGridSizeMs) + 1;
   const secondsPerDivisionLabel = formatSecondsPerDivision(renderedGridSizeMs);
+  const distanceGuide = useMemo<DistanceGuide | null>(() => {
+    if (!dragState || dragState.mode !== "move") {
+      return null;
+    }
+
+    const movingBlockIds = new Set(
+      (dragState.originBlocks.length > 0
+        ? dragState.originBlocks
+        : [dragState.originBlock]
+      ).map((block) => block.id),
+    );
+    const movingBlocks = blocks.filter((block) => movingBlockIds.has(block.id));
+
+    if (movingBlocks.length === 0) {
+      return null;
+    }
+
+    const groupStartMs = Math.min(...movingBlocks.map((block) => block.startMs));
+    const groupEndMs = Math.max(...movingBlocks.map((block) => getBlockEnd(block)));
+    const draggedRowIndex = rows.findIndex((row) => row.id === movingBlocks[0]?.rowId);
+
+    if (draggedRowIndex < 0) {
+      return null;
+    }
+
+    let closestGuide: DistanceGuide | null = null;
+
+    for (const candidateBlock of blocks) {
+      if (movingBlockIds.has(candidateBlock.id)) {
+        continue;
+      }
+
+      const candidateRowIndex = rows.findIndex((row) => row.id === candidateBlock.rowId);
+      if (candidateRowIndex < 0) {
+        continue;
+      }
+
+      const candidateStartMs = candidateBlock.startMs;
+      const candidateEndMs = getBlockEnd(candidateBlock);
+      const edgePairs = [
+        [candidateStartMs, groupStartMs],
+        [candidateEndMs, groupStartMs],
+        [candidateStartMs, groupEndMs],
+        [candidateEndMs, groupEndMs],
+      ] as const;
+
+      for (const [candidateEdgeMs, draggedEdgeMs] of edgePairs) {
+        const distanceMs = Math.abs(draggedEdgeMs - candidateEdgeMs);
+        const rowDistance = Math.abs(candidateRowIndex - draggedRowIndex);
+        const closestRowDistance = closestGuide
+          ? Math.abs(closestGuide.targetRowIndex - draggedRowIndex)
+          : Number.POSITIVE_INFINITY;
+
+        if (
+          !closestGuide ||
+          distanceMs < closestGuide.distanceMs ||
+          (distanceMs === closestGuide.distanceMs && rowDistance < closestRowDistance)
+        ) {
+          closestGuide = {
+            distanceMs,
+            draggedRowIndex,
+            targetRowIndex: candidateRowIndex,
+            startMs: Math.min(candidateEdgeMs, draggedEdgeMs),
+            endMs: Math.max(candidateEdgeMs, draggedEdgeMs),
+          };
+        }
+      }
+    }
+
+    return closestGuide;
+  }, [blocks, dragState, rows]);
 
   const rowsById = useMemo(
     () => getRowsById(rows),
@@ -407,6 +488,85 @@ export function TimelineGrid({
           className="relative"
           style={{ minWidth: ROW_HEADER_WIDTH + timelineWidth }}
         >
+          {distanceGuide ? (
+            <div
+              className="pointer-events-none absolute z-40"
+              style={{
+                left: ROW_HEADER_WIDTH,
+                top: TIME_RULER_HEIGHT,
+                width: timelineWidth,
+                height: rows.length * TIMELINE_ROW_HEIGHT,
+              }}
+            >
+              {(() => {
+                const guideStartPx = msToPx(distanceGuide.startMs, zoomPxPerMinute);
+                const guideEndPx = msToPx(distanceGuide.endMs, zoomPxPerMinute);
+                const guideLeftPx = Math.min(guideStartPx, guideEndPx);
+                const guideWidthPx = Math.abs(guideEndPx - guideStartPx);
+                const draggedCenterY =
+                  distanceGuide.draggedRowIndex * TIMELINE_ROW_HEIGHT +
+                  TIMELINE_ROW_HEIGHT / 2;
+                const targetCenterY =
+                  distanceGuide.targetRowIndex * TIMELINE_ROW_HEIGHT +
+                  TIMELINE_ROW_HEIGHT / 2;
+                const connectorTop = Math.min(draggedCenterY, targetCenterY);
+                const connectorHeight = Math.abs(targetCenterY - draggedCenterY);
+                const labelLeftPx = clamp(
+                  guideLeftPx + guideWidthPx / 2,
+                  36,
+                  Math.max(36, timelineWidth - 36),
+                );
+
+                return (
+                  <>
+                    <div
+                      className="absolute w-px border-l border-dashed border-sky-400/70"
+                      style={{
+                        left: guideStartPx,
+                        top: connectorTop,
+                        height: connectorHeight || TIMELINE_ROW_HEIGHT * 0.42,
+                        transform:
+                          connectorHeight === 0 ? "translateY(-50%)" : undefined,
+                      }}
+                    />
+                    <div
+                      className="absolute w-px border-l border-dashed border-sky-400/70"
+                      style={{
+                        left: guideEndPx,
+                        top: connectorTop,
+                        height: connectorHeight || TIMELINE_ROW_HEIGHT * 0.42,
+                        transform:
+                          connectorHeight === 0 ? "translateY(-50%)" : undefined,
+                      }}
+                    />
+                    <div
+                      className="absolute h-px bg-sky-500/85 shadow-[0_0_10px_rgba(14,165,233,0.45)]"
+                      style={{
+                        left: guideLeftPx,
+                        top: draggedCenterY,
+                        width: Math.max(guideWidthPx, 1),
+                      }}
+                    />
+                    <div
+                      className="absolute h-3 w-px -translate-y-1/2 bg-sky-500"
+                      style={{ left: guideStartPx, top: draggedCenterY }}
+                    />
+                    <div
+                      className="absolute h-3 w-px -translate-y-1/2 bg-sky-500"
+                      style={{ left: guideEndPx, top: draggedCenterY }}
+                    />
+                    <div
+                      className="absolute -translate-x-1/2 -translate-y-[calc(100%+6px)] rounded-full border border-sky-200 bg-white/95 px-2 py-0.5 font-mono text-[10px] font-semibold text-sky-700 shadow-[0_8px_20px_-12px_rgba(14,165,233,0.55)]"
+                      style={{ left: labelLeftPx, top: draggedCenterY }}
+                    >
+                      {formatDuration(distanceGuide.distanceMs)}
+                    </div>
+                  </>
+                );
+              })()}
+            </div>
+          ) : null}
+
           <div
             className="pointer-events-none absolute bottom-0 z-30 w-0"
             style={{
@@ -483,7 +643,7 @@ export function TimelineGrid({
                 className="grid border-b border-border/50 last:border-b-0"
                 style={{
                   gridTemplateColumns: `${ROW_HEADER_WIDTH}px ${timelineWidth}px`,
-                  minHeight: TIMELINE_ROW_HEIGHT,
+                  height: TIMELINE_ROW_HEIGHT,
                 }}
               >
                 <RowSidebar

@@ -28,12 +28,12 @@ import {
   getFixedPumpCalibrationFit,
   getFixedPumpFlowRateForDuration,
   getFixedPumpVolumeForDuration,
+  getPumpCalibrationKeyForRow,
   getPumpCalibrationFit,
   DEFAULT_PUMP_FLOW_UL_PER_MIN_PER_VOLT,
   MAX_PUMP_VOLTAGE,
   MIN_CALIBRATION_VOLTAGE,
   MIN_CALIBRATION_POINTS,
-  type PumpCalibrationSetFile,
 } from "@/lib/pump-calibration";
 import {
   getDefaultJsonFileName,
@@ -142,11 +142,17 @@ export function PumpCalibrationPanel() {
   const [calibrationFilePendingDelete, setCalibrationFilePendingDelete] = useState("");
   const [fileMessage, setFileMessage] = useState("");
   const peristalticRows = rows.filter((row) => row.deviceType === "peristaltic");
-  const selectedRunRowId =
-    runRowId && peristalticRows.some((row) => row.id === runRowId)
-      ? runRowId
-      : peristalticRows[0]?.id ?? "";
-  const selectedRunRow = peristalticRows.find((row) => row.id === selectedRunRowId) ?? null;
+  const selectedRunRow =
+    (runRowId &&
+      peristalticRows.find(
+        (row) => getPumpCalibrationKeyForRow(row) === runRowId || row.id === runRowId,
+      )) ||
+    peristalticRows[0] ||
+    null;
+  const selectedRunRowId = selectedRunRow?.id ?? "";
+  const selectedRunCalibrationKey = selectedRunRow
+    ? getPumpCalibrationKeyForRow(selectedRunRow)
+    : null;
   const selectedPumpRateMode = selectedRunRow?.pumpRateMode === "fixed" ? "fixed" : "variable";
   const isFixedRatePump = selectedPumpRateMode === "fixed";
   const fit = getPumpCalibrationFit({ vMax, points });
@@ -164,10 +170,10 @@ export function PumpCalibrationPanel() {
     : "";
 
   useEffect(() => {
-    if (selectedRunRowId !== runRowId) {
-      setRunRowId(selectedRunRowId || null);
+    if (selectedRunCalibrationKey !== runRowId) {
+      setRunRowId(selectedRunCalibrationKey);
     }
-  }, [runRowId, selectedRunRowId, setRunRowId]);
+  }, [runRowId, selectedRunCalibrationKey, setRunRowId]);
 
   const refreshCalibrationFiles = async () => {
     try {
@@ -194,9 +200,14 @@ export function PumpCalibrationPanel() {
 
   const saveCalibrationFile = async () => {
     try {
+      const existingCalibrationFile = await loadProjectJsonFile<unknown>(
+        "calibrations",
+        calibrationFileName,
+      ).catch(() => null);
       const calibrationFile = createPumpCalibrationSetFile({
-        activeRowId: selectedRunRowId || null,
+        activeRowId: selectedRunCalibrationKey,
         calibrationsByRowId,
+        existingFile: existingCalibrationFile,
         rows,
       });
       const savedFileName = await saveProjectJsonFile({
@@ -223,16 +234,12 @@ export function PumpCalibrationPanel() {
     }
 
     try {
-      const calibrationFile = await loadProjectJsonFile<PumpCalibrationSetFile>(
+      const calibrationFile = await loadProjectJsonFile<unknown>(
         "calibrations",
         selectedCalibrationFile,
       );
 
-      if (calibrationFile.kind !== "pumpCalibrationSet") {
-        throw new Error("Selected file is not a pump calibration set.");
-      }
-
-      importCalibrationSet(calibrationFile, selectedCalibrationFile);
+      importCalibrationSet(calibrationFile, selectedCalibrationFile, rows);
       setCalibrationFileName(selectedCalibrationFile);
       setCalibrationFilePendingDelete("");
       setFileMessage(`Loaded ${selectedCalibrationFile}.`);
@@ -552,7 +559,11 @@ export function PumpCalibrationPanel() {
                   id="calibration-pump"
                   disabled={isMainScheduleRunning}
                   value={selectedRunRowId}
-                  onChange={(event) => setRunRowId(event.target.value || null)}
+                  onChange={(event) => {
+                    const nextRow =
+                      peristalticRows.find((row) => row.id === event.target.value) ?? null;
+                    setRunRowId(nextRow ? getPumpCalibrationKeyForRow(nextRow) : null);
+                  }}
                 >
                   {peristalticRows.length > 0 ? (
                     peristalticRows.map((row) => (

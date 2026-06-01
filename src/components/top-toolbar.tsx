@@ -22,6 +22,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import {
+  DEFAULT_EXPERIMENT_DURATION_MS,
+  DEFAULT_ZOOM_PX_PER_MINUTE,
   GRID_OPTIONS,
   ZOOM_LEVELS,
   formatTimelineTime,
@@ -33,7 +35,6 @@ import {
 import {
   applyPumpCalibrationToBlocksByRowId,
   createPumpCalibrationSetFile,
-  type PumpCalibrationSetFile,
 } from "@/lib/pump-calibration";
 import {
   getDefaultJsonFileName,
@@ -66,6 +67,44 @@ interface ScheduleFile {
   zoomPxPerMinute: number;
   experimentDurationMs: number;
   lastCalibrationFileName: string;
+}
+
+function isScheduleRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizeNumber(value: unknown, fallback: number) {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function normalizeScheduleFile(file: unknown): ScheduleFile {
+  if (!isScheduleRecord(file)) {
+    throw new Error("Selected file is not an experiment schedule.");
+  }
+
+  if (typeof file.kind === "string" && file.kind !== "experimentSchedule") {
+    throw new Error("Selected file is not an experiment schedule.");
+  }
+
+  if (!Array.isArray(file.rows) || !Array.isArray(file.blocks)) {
+    throw new Error("Selected file is missing schedule rows or blocks.");
+  }
+
+  return {
+    kind: "experimentSchedule",
+    schemaVersion: 1,
+    savedAt: typeof file.savedAt === "string" ? file.savedAt : new Date().toISOString(),
+    rows: file.rows as Row[],
+    blocks: file.blocks as Block[],
+    gridSizeMs: normalizeNumber(file.gridSizeMs, GRID_OPTIONS[1]?.value ?? 500),
+    zoomPxPerMinute: normalizeNumber(file.zoomPxPerMinute, DEFAULT_ZOOM_PX_PER_MINUTE),
+    experimentDurationMs: normalizeNumber(
+      file.experimentDurationMs,
+      DEFAULT_EXPERIMENT_DURATION_MS,
+    ),
+    lastCalibrationFileName:
+      typeof file.lastCalibrationFileName === "string" ? file.lastCalibrationFileName : "",
+  };
 }
 
 interface TopToolbarProps {
@@ -210,12 +249,17 @@ export function TopToolbar({
     try {
       const companionCalibrationFileName =
         lastCalibrationFileName || getDefaultJsonFileName("calibration");
+      const existingCalibrationFile = await loadProjectJsonFile<unknown>(
+        "calibrations",
+        companionCalibrationFileName,
+      ).catch(() => null);
       const savedCalibrationFileName = await saveProjectJsonFile({
         folder: "calibrations",
         fileName: companionCalibrationFileName,
         content: createPumpCalibrationSetFile({
           activeRowId: calibrationRunRowId,
           calibrationsByRowId,
+          existingFile: existingCalibrationFile,
           rows,
         }),
       });
@@ -254,14 +298,11 @@ export function TopToolbar({
     }
 
     try {
-      const scheduleFile = await loadProjectJsonFile<ScheduleFile>(
+      const rawScheduleFile = await loadProjectJsonFile<unknown>(
         "schedules",
         selectedScheduleFile,
       );
-
-      if (scheduleFile.kind !== "experimentSchedule") {
-        throw new Error("Selected file is not an experiment schedule.");
-      }
+      const scheduleFile = normalizeScheduleFile(rawScheduleFile);
 
       loadSchedule({
         rows: scheduleFile.rows,
@@ -275,11 +316,11 @@ export function TopToolbar({
 
       if (scheduleFile.lastCalibrationFileName) {
         try {
-          const calibrationFile = await loadProjectJsonFile<PumpCalibrationSetFile>(
+          const calibrationFile = await loadProjectJsonFile<unknown>(
             "calibrations",
             scheduleFile.lastCalibrationFileName,
           );
-          importCalibrationSet(calibrationFile, scheduleFile.lastCalibrationFileName);
+          importCalibrationSet(calibrationFile, scheduleFile.lastCalibrationFileName, scheduleFile.rows);
           setScheduleFileMessage(
             `Loaded ${selectedScheduleFile} with ${scheduleFile.lastCalibrationFileName}.`,
           );

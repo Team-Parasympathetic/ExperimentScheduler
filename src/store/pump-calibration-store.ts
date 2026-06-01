@@ -8,16 +8,17 @@ import {
   normalizeCalibrationPointVoltage,
   normalizeFixedPumpCalibrationConfig,
   normalizeFixedPumpDurationMs,
+  migratePumpCalibrationsToHardwareKeys,
   normalizePumpCalibrationConfig,
+  normalizePumpCalibrationSetFile,
   normalizePumpVMax,
   normalizePumpVoltage,
   normalizeVariablePumpCalibrationConfig,
   type FixedPumpCalibrationPoint,
   type PumpCalibrationConfigByRowId,
-  type PumpCalibrationSetFile,
   type PumpCalibrationPoint,
 } from "@/lib/pump-calibration";
-import type { Direction } from "@/types/scheduler";
+import type { Direction, Row } from "@/types/scheduler";
 
 interface PumpCalibrationState {
   vMax: number;
@@ -43,7 +44,7 @@ interface PumpCalibrationState {
   setRunDirection: (direction: Direction) => void;
   setStatusMessage: (message: string) => void;
   setLastCalibrationFileName: (fileName: string) => void;
-  importCalibrationSet: (file: PumpCalibrationSetFile, fileName?: string) => void;
+  importCalibrationSet: (file: unknown, fileName?: string, rows?: Row[]) => void;
 }
 
 function normalizeMeasuredFlowRate(value: number | null) {
@@ -266,19 +267,18 @@ export const usePumpCalibrationStore = create<PumpCalibrationState>((set) => ({
   setRunDirection: (runDirection) => set({ runDirection }),
   setStatusMessage: (statusMessage) => set({ statusMessage }),
   setLastCalibrationFileName: (lastCalibrationFileName) => set({ lastCalibrationFileName }),
-  importCalibrationSet: (file, fileName = "") =>
+  importCalibrationSet: (file, fileName = "", rows = []) =>
     set((state) => {
-      const calibrationsByRowId = Object.fromEntries(
-        Object.entries(file.calibrationsByRowId ?? {}).map(([rowId, calibration]) => [
-          rowId,
-          normalizePumpCalibrationConfig(calibration),
-        ]),
+      const calibrationSet = normalizePumpCalibrationSetFile(file, rows);
+      const calibrationsByRowId = migratePumpCalibrationsToHardwareKeys(
+        calibrationSet.calibrationsByRowId,
+        rows,
       );
       const nextRunRowId =
         state.runRowId && calibrationsByRowId[state.runRowId]
           ? state.runRowId
-          : file.activeRowId && calibrationsByRowId[file.activeRowId]
-            ? file.activeRowId
+          : calibrationSet.activeRowId && calibrationsByRowId[calibrationSet.activeRowId]
+            ? calibrationSet.activeRowId
             : Object.keys(calibrationsByRowId)[0] ?? null;
       const activeCalibration = getCalibrationForRow(calibrationsByRowId, nextRunRowId);
 

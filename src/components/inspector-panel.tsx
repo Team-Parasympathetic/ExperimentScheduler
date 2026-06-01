@@ -54,6 +54,8 @@ export function InspectorPanel() {
     triggerFrequencyHz,
     triggerDutyCycle,
   );
+  const gridSizeSeconds = gridSizeMs / 1_000;
+  const minBlockDurationSeconds = MIN_BLOCK_DURATION_MS / 1_000;
 
   return (
     <Card className="glass-panel h-full min-h-0 overflow-hidden border-border/70">
@@ -106,34 +108,51 @@ export function InspectorPanel() {
 
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-1">
               <div className="space-y-2">
-                <Label htmlFor="inspector-start">Block Start (ms)</Label>
+                <Label htmlFor="inspector-start">Block Start (s)</Label>
                 <DraftNumberInput
                   id="inspector-start"
                   min={0}
                   minValue={0}
-                  step={gridSizeMs}
+                  step={gridSizeSeconds}
                   type="number"
-                  value={block.startMs}
+                  value={block.startMs / 1_000}
                   onCommit={(value) =>
                     updateBlock(block.id, {
-                      startMs: value,
+                      startMs: value * 1_000,
                     })
                   }
                 />
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="inspector-duration">Duration (ms)</Label>
+                <Label htmlFor="inspector-stop">Stop Time (s)</Label>
                 <DraftNumberInput
-                  id="inspector-duration"
-                  min={MIN_BLOCK_DURATION_MS}
-                  minValue={MIN_BLOCK_DURATION_MS}
-                  step={gridSizeMs}
+                  id="inspector-stop"
+                  min={block.startMs / 1_000 + minBlockDurationSeconds}
+                  minValue={block.startMs / 1_000 + minBlockDurationSeconds}
+                  step={gridSizeSeconds}
                   type="number"
-                  value={block.durationMs}
+                  value={(block.startMs + block.durationMs) / 1_000}
                   onCommit={(value) =>
                     updateBlock(block.id, {
-                      durationMs: value,
+                      durationMs: value * 1_000 - block.startMs,
+                    })
+                  }
+                />
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="inspector-duration">Duration (s)</Label>
+                <DraftNumberInput
+                  id="inspector-duration"
+                  min={minBlockDurationSeconds}
+                  minValue={minBlockDurationSeconds}
+                  step={gridSizeSeconds}
+                  type="number"
+                  value={block.durationMs / 1_000}
+                  onCommit={(value) =>
+                    updateBlock(block.id, {
+                      durationMs: value * 1_000,
                     })
                   }
                 />
@@ -179,17 +198,17 @@ export function InspectorPanel() {
                     </div>
 
                     <div className="space-y-2">
-                      <Label htmlFor="inspector-trigger-period">Period (ms)</Label>
+                      <Label htmlFor="inspector-trigger-period">Period (s)</Label>
                       <DraftNumberInput
                         id="inspector-trigger-period"
-                        min="0.0001"
+                        min="0.0000001"
                         minValue={Number.EPSILON}
                         step="any"
                         type="number"
-                        value={triggerPeriodMs}
+                        value={triggerPeriodMs / 1_000}
                         onCommit={(value) =>
                           updateBlock(block.id, {
-                            frequencyHz: getFrequencyHzFromPeriodMs(value),
+                            frequencyHz: getFrequencyHzFromPeriodMs(value * 1_000),
                           })
                         }
                       />
@@ -215,19 +234,19 @@ export function InspectorPanel() {
                     </div>
 
                     <div className="space-y-2">
-                      <Label htmlFor="inspector-trigger-high-time">High Time (ms)</Label>
+                      <Label htmlFor="inspector-trigger-high-time">High Time (s)</Label>
                       <DraftNumberInput
                         id="inspector-trigger-high-time"
                         min="0"
                         minValue={0}
                         step="any"
                         type="number"
-                        value={triggerHighTimeMs}
+                        value={triggerHighTimeMs / 1_000}
                         onCommit={(value) =>
                           updateBlock(block.id, {
                             dutyCycle: getDutyCycleFromHighTimeMs(
                               triggerFrequencyHz,
-                              value,
+                              value * 1_000,
                             ),
                           })
                         }

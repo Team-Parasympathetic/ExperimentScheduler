@@ -6,6 +6,7 @@ import {
   getHardwareShortLabel,
   getUsedHardwareIds,
 } from "@/lib/hardware-bindings";
+import { cn } from "@/lib/utils";
 import { useBoardStore } from "@/store/board-store";
 import { useSchedulerStore } from "@/store/scheduler-store";
 import type { Row } from "@/types/scheduler";
@@ -14,12 +15,20 @@ interface HardwareAssignmentSelectProps {
   id: string;
   row: Row;
   label?: string;
+  className?: string;
+  labelClassName?: string;
+  selectClassName?: string;
+  showLabel?: boolean;
 }
 
 export function HardwareAssignmentSelect({
+  className,
   id,
   label = "Hardware",
+  labelClassName,
   row,
+  selectClassName,
+  showLabel = true,
 }: HardwareAssignmentSelectProps) {
   const rows = useSchedulerStore((state) => state.rows);
   const updateRow = useSchedulerStore((state) => state.updateRow);
@@ -33,10 +42,14 @@ export function HardwareAssignmentSelect({
     options.some((option) => option.value === selectedHardwareId);
 
   return (
-    <div className="space-y-2">
-      <Label htmlFor={id}>{label}</Label>
+    <div className={cn("space-y-2", className)}>
+      <Label className={cn(showLabel ? "" : "sr-only", labelClassName)} htmlFor={id}>
+        {label}
+      </Label>
       <Select
         id={id}
+        aria-label={showLabel ? undefined : label}
+        className={selectClassName}
         value={selectedHardwareId === null ? "" : String(selectedHardwareId)}
         onChange={(event) =>
           updateRow(row.id, {

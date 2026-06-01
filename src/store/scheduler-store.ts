@@ -110,6 +110,7 @@ interface SchedulerState {
   }) => void;
   addRow: (deviceType?: DeviceType) => void;
   removeRow: (rowId: string) => void;
+  moveRow: (rowId: string, direction: -1 | 1) => void;
   updateRow: (rowId: string, patch: Partial<Omit<Row, "id">>) => void;
   addBlock: (rowId: string, startMs: number, durationMs?: number) => void;
   pasteBlock: (block: Block) => void;
@@ -129,7 +130,7 @@ const initialRows: Row[] = [
     id: "row-a",
     name: "Pump 0",
     deviceType: "peristaltic",
-    hardwareId: 0,
+    hardwareId: null,
     pumpRateMode: "variable",
   },
   { id: "row-b", name: "PWM 0", deviceType: "trigger", hardwareId: null },
@@ -302,19 +303,6 @@ function getNextPumpHardwareId(
 
   if (availablePumpHardwareIds.length > 0) {
     return availablePumpHardwareIds.find((pumpId) => !usedPumpIds.has(pumpId)) ?? null;
-  }
-
-  const maxUsedPumpId = Math.max(-1, ...Array.from(usedPumpIds));
-  const nextSequentialPumpId = maxUsedPumpId + 1;
-
-  if (nextSequentialPumpId < FIRMWARE_SCHEDULE_LIMITS.maxPumps) {
-    return nextSequentialPumpId;
-  }
-
-  for (let pumpId = 0; pumpId < FIRMWARE_SCHEDULE_LIMITS.maxPumps; pumpId++) {
-    if (!usedPumpIds.has(pumpId)) {
-      return pumpId;
-    }
   }
 
   return null;
@@ -1209,6 +1197,25 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
         experimentDurationMs: nextExperimentDurationMs,
         ...getPlayheadSnapshot(state, nextExperimentDurationMs, nowMs),
       });
+    }),
+  moveRow: (rowId, direction) =>
+    set((state) => {
+      const currentIndex = state.rows.findIndex((row) => row.id === rowId);
+      const nextIndex = currentIndex + direction;
+
+      if (
+        currentIndex < 0 ||
+        nextIndex < 0 ||
+        nextIndex >= state.rows.length
+      ) {
+        return state;
+      }
+
+      const rows = [...state.rows];
+      const [movedRow] = rows.splice(currentIndex, 1);
+      rows.splice(nextIndex, 0, movedRow);
+
+      return withHistory(state, { rows });
     }),
   updateRow: (rowId, patch) =>
     set((state) => {

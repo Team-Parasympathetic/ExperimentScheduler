@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Plus } from "lucide-react";
 import { BlockContextMenu } from "@/components/block-context-menu";
+import { FloatingWindow } from "@/components/floating-window";
 import { SchedulerLayout } from "@/components/scheduler-layout";
 import { TopToolbar } from "@/components/top-toolbar";
 import { Button } from "@/components/ui/button";
@@ -37,49 +38,24 @@ function InsertBlockContextMenu({
   onClose,
   onInsert,
 }: InsertBlockContextMenuProps) {
-  const ref = useRef<HTMLDivElement>(null);
   const rows = useSchedulerStore((state) => state.rows);
   const row = rows.find((item) => item.id === rowId) ?? null;
-  const menuLeft =
-    typeof window === "undefined" ? x : Math.max(12, Math.min(x, window.innerWidth - 240));
-  const menuTop =
-    typeof window === "undefined" ? y : Math.max(12, Math.min(y, window.innerHeight - 150));
-
-  useEffect(() => {
-    const handlePointerDown = (event: MouseEvent) => {
-      if (!ref.current?.contains(event.target as Node)) {
-        onClose();
-      }
-    };
-
-    const handleEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        onClose();
-      }
-    };
-
-    window.addEventListener("mousedown", handlePointerDown);
-    window.addEventListener("keydown", handleEscape);
-
-    return () => {
-      window.removeEventListener("mousedown", handlePointerDown);
-      window.removeEventListener("keydown", handleEscape);
-    };
-  }, [onClose]);
 
   if (!row) {
     return null;
   }
 
   return (
-    <div
-      ref={ref}
-      className="fixed z-50 w-[220px] rounded-xl border border-border/70 bg-white/95 p-3 shadow-[0_18px_54px_-32px_rgba(15,23,42,0.35)] backdrop-blur"
-      style={{ left: menuLeft, top: menuTop }}
+    <FloatingWindow
+      title="Insert Block"
+      subtitle={row.name}
+      x={x}
+      y={y}
+      width={240}
+      maxHeight={180}
+      onClose={onClose}
+      contentClassName="p-3"
     >
-      <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.22em] text-muted-foreground">
-        {row.name}
-      </div>
       <Button
         className="w-full justify-start"
         size="sm"
@@ -92,7 +68,7 @@ function InsertBlockContextMenu({
         <Plus className="h-4 w-4" />
         Insert Block at {formatTimelineTime(timeMs)}
       </Button>
-    </div>
+    </FloatingWindow>
   );
 }
 
@@ -110,7 +86,7 @@ export function AppShell() {
   const playheadMs = useSchedulerStore((state) => state.playheadMs);
   const deleteBlocks = useSchedulerStore((state) => state.deleteBlocks);
   const pasteBlocks = useSchedulerStore((state) => state.pasteBlocks);
-  const stopExperiment = useSchedulerStore((state) => state.stopExperiment);
+  const resetExperiment = useSchedulerStore((state) => state.resetExperiment);
   const undo = useSchedulerStore((state) => state.undo);
   const redo = useSchedulerStore((state) => state.redo);
   const syncPlayhead = useSchedulerStore((state) => state.syncPlayhead);
@@ -118,11 +94,24 @@ export function AppShell() {
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const autoStopRequestedRef = useRef(false);
+  const shortcutsRef = useRef({
+    blocks,
+    copiedBlocks: [] as Block[],
+    selectedBlockIds,
+  });
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [insertMenu, setInsertMenu] = useState<InsertMenuState | null>(null);
   const [copiedBlocks, setCopiedBlocks] = useState<Block[]>([]);
   const [viewportStartMs, setViewportStartMs] = useState(0);
   const [viewportDurationMs, setViewportDurationMs] = useState(20 * 60_000);
+
+  useEffect(() => {
+    shortcutsRef.current = {
+      blocks,
+      copiedBlocks,
+      selectedBlockIds,
+    };
+  }, [blocks, copiedBlocks, selectedBlockIds]);
 
   useEffect(() => {
     const node = scrollRef.current;
@@ -180,7 +169,7 @@ export function AppShell() {
     }
 
     autoStopRequestedRef.current = true;
-    stopExperiment();
+    resetExperiment();
 
     const trimmedComPort = comPort.trim();
     setScheduleCommandState("stop");
@@ -207,9 +196,9 @@ export function AppShell() {
     comPort,
     experimentState,
     playheadMs,
+    resetExperiment,
     setScheduleCommandState,
     setScheduleMessage,
-    stopExperiment,
   ]);
 
   useEffect(() => {
@@ -247,14 +236,17 @@ export function AppShell() {
         target instanceof HTMLTextAreaElement ||
         target instanceof HTMLSelectElement ||
         target?.isContentEditable;
+      const shortcutState = shortcutsRef.current;
 
-      if (event.key === "Delete" && selectedBlockIds.length > 0 && !isTypingTarget) {
+      if (event.key === "Delete" && shortcutState.selectedBlockIds.length > 0 && !isTypingTarget) {
         event.preventDefault();
-        deleteBlocks(selectedBlockIds);
+        event.stopPropagation();
+        deleteBlocks(shortcutState.selectedBlockIds);
       }
 
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z" && !isTypingTarget) {
         event.preventDefault();
+        event.stopPropagation();
         if (event.shiftKey) {
           redo();
         } else {
@@ -264,25 +256,30 @@ export function AppShell() {
 
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "y" && !isTypingTarget) {
         event.preventDefault();
+        event.stopPropagation();
         redo();
       }
 
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c" && !isTypingTarget) {
-        const selectedBlockIdSet = new Set(selectedBlockIds);
-        const blocksToCopy = blocks
+        const selectedBlockIdSet = new Set(shortcutState.selectedBlockIds);
+        const blocksToCopy = shortcutState.blocks
           .filter((item) => selectedBlockIdSet.has(item.id))
           .sort((left, right) => left.startMs - right.startMs || left.id.localeCompare(right.id));
 
         if (blocksToCopy.length > 0) {
           event.preventDefault();
-          setCopiedBlocks(blocksToCopy.map((block) => ({ ...block })));
+          event.stopPropagation();
+          const nextCopiedBlocks = blocksToCopy.map((block) => ({ ...block }));
+          shortcutsRef.current.copiedBlocks = nextCopiedBlocks;
+          setCopiedBlocks(nextCopiedBlocks);
         }
       }
 
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "v" && !isTypingTarget) {
-        if (copiedBlocks.length > 0) {
+        if (shortcutState.copiedBlocks.length > 0) {
           event.preventDefault();
-          pasteBlocks(copiedBlocks);
+          event.stopPropagation();
+          pasteBlocks(shortcutState.copiedBlocks);
         }
       }
 
@@ -292,9 +289,9 @@ export function AppShell() {
       }
     };
 
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [blocks, copiedBlocks, deleteBlocks, pasteBlocks, redo, selectedBlockIds, undo]);
+    document.addEventListener("keydown", handleKeyDown, { capture: true });
+    return () => document.removeEventListener("keydown", handleKeyDown, { capture: true });
+  }, [deleteBlocks, pasteBlocks, redo, undo]);
 
   return (
     <div className="adaptive-shell relative flex h-full flex-col overflow-hidden px-5 pb-5 pt-4 text-foreground">
