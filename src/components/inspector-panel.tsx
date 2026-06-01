@@ -274,26 +274,21 @@ export function InspectorPanel() {
                 </div>
 
                 <div className="space-y-2">
-                  <Label htmlFor="inspector-flow-rate">Flow Rate</Label>
-                  <div className="relative">
-                    <DraftNumberInput
-                      id="inspector-flow-rate"
-                      className="pr-20"
-                      min={0}
-                      minValue={0}
-                      step="10"
-                      type="number"
-                      value={block.flowRate}
-                      onCommit={(value) =>
-                        updateBlock(block.id, {
-                          flowRate: value,
-                        })
-                      }
-                    />
-                    <span className="pointer-events-none absolute right-8 top-1/2 -translate-y-1/2 text-xs uppercase tracking-[0.16em] text-muted-foreground">
-                      uL/min
-                    </span>
-                  </div>
+                  <Label htmlFor="inspector-flow-rate">Flow Rate (uL/min)</Label>
+                  <DraftNumberInput
+                    id="inspector-flow-rate"
+                    className="pr-3 [appearance:textfield] [&::-webkit-inner-spin-button]:m-0 [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:m-0 [&::-webkit-outer-spin-button]:appearance-none"
+                    min={0}
+                    minValue={0}
+                    step="10"
+                    type="number"
+                    value={block.flowRate}
+                    onCommit={(value) =>
+                      updateBlock(block.id, {
+                        flowRate: value,
+                      })
+                    }
+                  />
                 </div>
               </div>
             )}
