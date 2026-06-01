@@ -35,6 +35,55 @@ function New-AppShortcut {
   $shortcut.Save()
 }
 
+function Stop-ExistingAppProcess {
+  $processes = @(Get-Process -Name "experiment_scheduler" -ErrorAction SilentlyContinue)
+
+  if ($processes.Count -eq 0) {
+    return
+  }
+
+  Write-Host "Closing running $appName app before rebuilding..."
+
+  foreach ($process in $processes) {
+    try {
+      if ($process.MainWindowHandle -ne 0) {
+        [void]$process.CloseMainWindow()
+      }
+    } catch {
+      Write-Host "Could not ask process $($process.Id) to close cleanly: $($_.Exception.Message)"
+    }
+  }
+
+  Start-Sleep -Seconds 2
+
+  $remainingProcesses = @(Get-Process -Name "experiment_scheduler" -ErrorAction SilentlyContinue)
+  if ($remainingProcesses.Count -gt 0) {
+    Write-Host "Forcing remaining $appName app process to close..."
+    $remainingProcesses | Stop-Process -Force
+    Start-Sleep -Seconds 1
+  }
+}
+
+function Remove-ExistingAppExe {
+  if (-not (Test-Path $exePath)) {
+    return
+  }
+
+  for ($attempt = 1; $attempt -le 5; $attempt++) {
+    try {
+      Remove-Item -LiteralPath $exePath -Force
+      return
+    } catch {
+      if ($attempt -eq 5) {
+        throw "Could not replace $exePath. Close Experiment Scheduler and any antivirus scan dialogs, then run Install-Lab-App.cmd again. Original error: $($_.Exception.Message)"
+      }
+
+      Write-Host "Waiting for old app executable to unlock..."
+      Start-Sleep -Seconds 1
+    }
+  }
+}
+
 if (-not $SkipBuild) {
   Assert-Command "npm" "Install Node.js LTS from https://nodejs.org/."
   Assert-Command "cargo" "Install Rust from https://rustup.rs/."
@@ -42,6 +91,8 @@ if (-not $SkipBuild) {
   Push-Location $repoRoot
   try {
     npm ci
+    Stop-ExistingAppProcess
+    Remove-ExistingAppExe
     npm run tauri build
   } finally {
     Pop-Location

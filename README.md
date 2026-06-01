@@ -33,6 +33,8 @@ git pull
 powershell -ExecutionPolicy Bypass -File .\scripts\windows\setup-lab-app.ps1
 ```
 
+The update script closes any running **Experiment Scheduler** window before rebuilding. If Windows still reports that `experiment_scheduler.exe` cannot be removed, close the app manually, wait a few seconds for antivirus/file indexing to release it, and run `Install-Lab-App.cmd` again.
+
 If the app was already built and you only need to recreate shortcuts:
 
 ```powershell
