@@ -7,6 +7,7 @@ import { TopToolbar } from "@/components/top-toolbar";
 import { Button } from "@/components/ui/button";
 import { ROW_HEADER_WIDTH } from "@/lib/layout";
 import { stopBoardSchedule } from "@/lib/board-api";
+import { emitBlockCreationGuide } from "@/lib/smart-guides";
 import { formatTimelineTime, getRequiredScheduleDuration, msToPx, pxToMs } from "@/lib/time";
 import { useBoardStore } from "@/store/board-store";
 import { useSchedulerStore } from "@/store/scheduler-store";
@@ -94,6 +95,7 @@ export function AppShell() {
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const autoStopRequestedRef = useRef(false);
+  const lastContextMenuRef = useRef<ContextMenuState | null>(null);
   const shortcutsRef = useRef({
     blocks,
     copiedBlocks: [] as Block[],
@@ -104,6 +106,35 @@ export function AppShell() {
   const [copiedBlocks, setCopiedBlocks] = useState<Block[]>([]);
   const [viewportStartMs, setViewportStartMs] = useState(0);
   const [viewportDurationMs, setViewportDurationMs] = useState(20 * 60_000);
+
+  useEffect(() => {
+    const handleSyncSourcePicked = (event: Event) => {
+      const targetBlockId = (event as CustomEvent<{ targetBlockId?: string }>).detail
+        ?.targetBlockId;
+
+      if (!targetBlockId) {
+        return;
+      }
+
+      const lastContextMenu = lastContextMenuRef.current;
+      setInsertMenu(null);
+      setSelectedBlock(targetBlockId);
+      setContextMenu({
+        blockId: targetBlockId,
+        x: lastContextMenu?.blockId === targetBlockId ? lastContextMenu.x : window.innerWidth / 2,
+        y:
+          lastContextMenu?.blockId === targetBlockId
+            ? lastContextMenu.y
+            : Math.max(120, window.innerHeight / 3),
+      });
+    };
+
+    window.addEventListener("scheduler:sync-source-picked", handleSyncSourcePicked);
+
+    return () => {
+      window.removeEventListener("scheduler:sync-source-picked", handleSyncSourcePicked);
+    };
+  }, [setSelectedBlock]);
 
   useEffect(() => {
     shortcutsRef.current = {
@@ -279,7 +310,15 @@ export function AppShell() {
         if (shortcutState.copiedBlocks.length > 0) {
           event.preventDefault();
           event.stopPropagation();
+          const previousBlockIds = new Set(
+            useSchedulerStore.getState().blocks.map((block) => block.id),
+          );
           pasteBlocks(shortcutState.copiedBlocks);
+          const newBlockIds = useSchedulerStore
+            .getState()
+            .blocks.filter((block) => !previousBlockIds.has(block.id))
+            .map((block) => block.id);
+          emitBlockCreationGuide(newBlockIds);
         }
       }
 
@@ -322,7 +361,9 @@ export function AppShell() {
             setSelectedBlock(blockId);
           }
           setInsertMenu(null);
-          setContextMenu({ blockId, x, y });
+          const nextContextMenu = { blockId, x, y };
+          lastContextMenuRef.current = nextContextMenu;
+          setContextMenu(nextContextMenu);
         }}
         onOpenInsertContextMenu={(rowId, timeMs, x, y) => {
           setContextMenu(null);
@@ -347,7 +388,17 @@ export function AppShell() {
         <InsertBlockContextMenu
           {...insertMenu}
           onClose={() => setInsertMenu(null)}
-          onInsert={() => addBlock(insertMenu.rowId, insertMenu.timeMs)}
+          onInsert={() => {
+            const previousBlockIds = new Set(
+              useSchedulerStore.getState().blocks.map((block) => block.id),
+            );
+            addBlock(insertMenu.rowId, insertMenu.timeMs);
+            const newBlockIds = useSchedulerStore
+              .getState()
+              .blocks.filter((block) => !previousBlockIds.has(block.id))
+              .map((block) => block.id);
+            emitBlockCreationGuide(newBlockIds);
+          }}
         />
       ) : null}
     </div>

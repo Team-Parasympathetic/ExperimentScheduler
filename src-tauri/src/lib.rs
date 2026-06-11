@@ -79,6 +79,9 @@ struct SchedulerBlockInput {
     trigger_mode: Option<String>,
     frequency_hz: Option<f64>,
     duty_cycle: Option<f64>,
+    require_complete_periods: Option<bool>,
+    sync_source_block_id: Option<String>,
+    period_multiplier: Option<f64>,
 }
 
 #[tauri::command]
@@ -151,8 +154,8 @@ fn upload_schedule(
         Ok(report) => BoardCommandResult {
             ok: true,
             message: format!(
-                "Uploaded {} event(s). Board status: {}.",
-                report.event_count, report.status.state
+                "Uploaded {} event(s) in {} attempt(s). Board status: {}.",
+                report.event_count, report.attempts, report.status.state
             ),
             status: Some(report.status),
             log: output.log,
@@ -170,12 +173,28 @@ fn start_schedule(port_name: String) -> BoardCommandResult {
 
     let output = protocol::start_schedule(&trimmed_port);
     match output.result {
+        Ok(()) => BoardCommandResult {
+            ok: true,
+            message: "Start command acknowledged; waiting for board status.".to_string(),
+            status: None,
+            log: output.log,
+        },
+        Err(error) => command_error(error, output.log),
+    }
+}
+
+#[tauri::command]
+fn get_status(port_name: String) -> BoardCommandResult {
+    let trimmed_port = match require_port_name(&port_name) {
+        Ok(trimmed_port) => trimmed_port,
+        Err(message) => return command_error(message, Vec::new()),
+    };
+
+    let output = protocol::get_status(&trimmed_port);
+    match output.result {
         Ok(status) => BoardCommandResult {
             ok: true,
-            message: format!(
-                "Start command acknowledged. Board status: {}.",
-                status.state
-            ),
+            message: format!("Board status: {}.", status.state),
             status: Some(status),
             log: output.log,
         },
@@ -349,6 +368,7 @@ pub fn run() {
             upload_schedule,
             start_schedule,
             stop_schedule,
+            get_status,
             list_data_files,
             save_data_file,
             load_data_file,
@@ -385,9 +405,9 @@ mod protocol {
     const MODULE_GPIO_FPGA: u8 = 0x02;
     const PUMP_SET_STATE: u8 = 0x01;
     const GPIO_SET_WAVEFORM: u8 = 0x01;
-    const GPIO_FORCE_LOW: u8 = 0x02;
-    const GPIO_FORCE_HIGH: u8 = 0x03;
-    const GPIO_STOP: u8 = 0x04;
+    const GPIO_PULSE: u8 = 0x02;
+    const GPIO_STOP: u8 = 0x03;
+    const GPIO_MIRROR_SYNC: u8 = 0x04;
     const CARD_INVENTORY_ENTRY_SIZE: usize = 7;
     const EVENT_HEADER_SIZE: usize = 13;
     const ACTION_HEADER_SIZE: usize = 4;
@@ -405,7 +425,9 @@ mod protocol {
     const START_RESPONSE_TIMEOUT: Duration = Duration::from_millis(3_000);
     const INTER_COMMAND_DELAY: Duration = Duration::from_millis(50);
     const READ_IDLE_DELAY: Duration = Duration::from_millis(10);
-
+    const UPLOAD_ATTEMPTS: usize = 3;
+    const START_ATTEMPTS: usize = 3;
+    const PWM_BOUNDARY_GUARD_US: u64 = 1;
     pub struct ProtocolResult<T> {
         pub result: Result<T, String>,
         pub log: Vec<SerialLogEntry>,
@@ -414,6 +436,7 @@ mod protocol {
     pub struct UploadReport {
         pub event_count: usize,
         pub status: BoardStatus,
+        pub attempts: usize,
     }
 
     struct CompiledEvent {
@@ -424,6 +447,7 @@ mod protocol {
 
     #[derive(Default)]
     struct PendingEventActions {
+        coalesces_nearby: bool,
         end_actions: Vec<Vec<u8>>,
         start_actions: Vec<Vec<u8>>,
     }
@@ -461,32 +485,118 @@ mod protocol {
                 .any(|slot| slot.present && slot.card_type == "timing");
             let events = compile_schedule_events(rows, blocks, &pump_slots, has_timing_card)?;
 
-            client.clear_schedule(seq)?;
-            seq = next_seq(seq);
-            thread::sleep(INTER_COMMAND_DELAY);
+            let mut last_error = None;
 
-            for event in &events {
-                client.upload_event(seq, event.event_id, event.timestamp_us, &event.payload)?;
-                seq = next_seq(seq);
-                thread::sleep(INTER_COMMAND_DELAY);
+            for attempt in 1..=UPLOAD_ATTEMPTS {
+                match upload_schedule_attempt(client, &events, &mut seq) {
+                    Ok(status) => {
+                        return Ok(UploadReport {
+                            event_count: events.len(),
+                            status,
+                            attempts: attempt,
+                        });
+                    }
+                    Err(error) => {
+                        last_error = Some(error);
+
+                        if attempt < UPLOAD_ATTEMPTS {
+                            client.log_note(&format!(
+                                "Upload attempt {attempt} failed; clearing board schedule before retry."
+                            ));
+                            let _ = client.clear_schedule(seq);
+                            seq = next_seq(seq);
+                            thread::sleep(INTER_COMMAND_DELAY);
+                        }
+                    }
+                }
             }
 
-            let status = client.get_status(seq)?;
-            Ok(UploadReport {
-                event_count: events.len(),
-                status,
-            })
+            client.log_note(
+                "All upload attempts failed; clearing board schedule before returning error.",
+            );
+            let _ = client.clear_schedule(seq);
+            thread::sleep(INTER_COMMAND_DELAY);
+
+            Err(last_error.unwrap_or_else(|| "Schedule upload failed.".to_string()))
         })
     }
 
-    pub fn start_schedule(port_name: &str) -> ProtocolResult<BoardStatus> {
+    fn upload_schedule_attempt(
+        client: &mut BackplaneClient,
+        events: &[CompiledEvent],
+        seq: &mut u16,
+    ) -> Result<BoardStatus, String> {
+        client.clear_schedule(*seq)?;
+        *seq = next_seq(*seq);
+        thread::sleep(INTER_COMMAND_DELAY);
+
+        for event in events {
+            client.upload_event(*seq, event.event_id, event.timestamp_us, &event.payload)?;
+            *seq = next_seq(*seq);
+            thread::sleep(INTER_COMMAND_DELAY);
+        }
+
+        let status = client.get_status(*seq)?;
+        *seq = next_seq(*seq);
+        thread::sleep(INTER_COMMAND_DELAY);
+
+        if status.state_code == 4 {
+            return Err(format!(
+                "Board entered error state after upload. Last error: 0x{:02X}.",
+                status.last_error
+            ));
+        }
+
+        if status.event_count as usize != events.len() {
+            return Err(format!(
+                "Upload verification failed: board reports {} loaded event(s), expected {}.",
+                status.event_count,
+                events.len()
+            ));
+        }
+
+        Ok(status)
+    }
+
+    pub fn start_schedule(port_name: &str) -> ProtocolResult<()> {
         with_client(port_name, |client| {
             let mut seq = 1u16;
             client.ping(seq)?;
             seq = next_seq(seq);
             thread::sleep(INTER_COMMAND_DELAY);
 
-            client.start_schedule(seq)?;
+            let mut last_error = None;
+
+            for attempt in 1..=START_ATTEMPTS {
+                match client.start_schedule(seq) {
+                    Ok(()) => return Ok(()),
+                    Err(error) if is_pump_offload_error(&error) => {
+                        last_error = Some(error);
+
+                        if attempt < START_ATTEMPTS {
+                            client.log_note(&format!(
+                                "Start attempt {attempt} failed during pump offload; retrying START_SCHEDULE."
+                            ));
+                            seq = next_seq(seq);
+                            thread::sleep(INTER_COMMAND_DELAY);
+                        }
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+
+            Err(format!(
+                "{} Start was retried {} times.",
+                last_error.unwrap_or_else(|| "Pump offload failed.".to_string()),
+                START_ATTEMPTS
+            ))
+        })
+    }
+
+    pub fn get_status(port_name: &str) -> ProtocolResult<BoardStatus> {
+        with_client(port_name, |client| {
+            let mut seq = 1u16;
+            client.ping(seq)?;
             seq = next_seq(seq);
             thread::sleep(INTER_COMMAND_DELAY);
 
@@ -543,9 +653,13 @@ mod protocol {
             .enumerate()
             .map(|(index, row)| (row.id.as_str(), index))
             .collect();
+        let blocks_by_id: HashMap<&str, &SchedulerBlockInput> = blocks
+            .iter()
+            .map(|block| (block.id.as_str(), block))
+            .collect();
         let row_pump_ids = map_rows_to_pump_module_ids(rows, pump_slots)?;
         let row_gpio_ids = map_rows_to_gpio_module_ids(rows)?;
-        let mut events_by_time: BTreeMap<u64, PendingEventActions> = BTreeMap::new();
+        let mut events_by_time_us: BTreeMap<u64, PendingEventActions> = BTreeMap::new();
         let mut gpio_action_count = 0usize;
         let schedule_status_rows = rows
             .iter()
@@ -588,13 +702,13 @@ mod protocol {
                 ));
             }
 
-            let start_ms = normalize_ms(block.start_ms, "start", &block.id)?;
-            let duration_ms = normalize_ms(block.duration_ms, "duration", &block.id)?;
-            if duration_ms == 0 {
+            let start_us = normalize_time_us(block.start_ms, "start", &block.id)?;
+            let duration_us = normalize_time_us(block.duration_ms, "duration", &block.id)?;
+            if duration_us == 0 {
                 return Err(format!("Block {} has zero duration.", block.id));
             }
 
-            let end_ms = start_ms.checked_add(duration_ms).ok_or_else(|| {
+            let end_us = start_us.checked_add(duration_us).ok_or_else(|| {
                 format!(
                     "Block {} ends beyond the representable time range.",
                     block.id
@@ -618,13 +732,13 @@ mod protocol {
                         format!("No detected pump module is assigned to '{}'.", row.name)
                     })?;
 
-                    events_by_time
-                        .entry(start_ms)
+                    events_by_time_us
+                        .entry(start_us)
                         .or_default()
                         .start_actions
                         .push(build_pump_action(pump_id, true, direction, flow_nl_min));
-                    events_by_time
-                        .entry(end_ms)
+                    events_by_time_us
+                        .entry(end_us)
                         .or_default()
                         .end_actions
                         .push(build_pump_action(pump_id, false, direction, 0));
@@ -640,36 +754,43 @@ mod protocol {
                     let gpio_id = *row_gpio_ids
                         .get(row.id.as_str())
                         .ok_or_else(|| format!("Select an FPGA output pin for '{}'.", row.name))?;
-                    let trigger_mode = block.trigger_mode.as_deref().unwrap_or("waveform");
+                    let trigger_mode = block.trigger_mode.as_deref().unwrap_or("pulse");
 
                     match trigger_mode {
-                        "rising" => {
-                            events_by_time
-                                .entry(start_ms)
+                        "pulse" | "rising" | "falling" => {
+                            events_by_time_us
+                                .entry(start_us)
                                 .or_default()
                                 .start_actions
-                                .push(build_gpio_force_action(gpio_id, GPIO_FORCE_HIGH));
-                            gpio_action_count += 1;
-                        }
-                        "falling" => {
-                            events_by_time
-                                .entry(start_ms)
-                                .or_default()
-                                .start_actions
-                                .push(build_gpio_force_action(gpio_id, GPIO_FORCE_LOW));
-                            gpio_action_count += 1;
-                        }
-                        "waveform" => {
-                            events_by_time
-                                .entry(start_ms)
-                                .or_default()
-                                .start_actions
-                                .push(build_gpio_waveform_action(gpio_id, block)?);
-                            events_by_time
-                                .entry(end_ms)
+                                .push(build_gpio_zero_payload_action(gpio_id, GPIO_PULSE));
+                            events_by_time_us
+                                .entry(end_us)
                                 .or_default()
                                 .end_actions
-                                .push(build_gpio_force_action(gpio_id, GPIO_STOP));
+                                .push(build_gpio_zero_payload_action(gpio_id, GPIO_STOP));
+                            gpio_action_count += 2;
+                        }
+                        "waveform" | "sync-division" => {
+                            let waveform_phase_step = waveform_phase_step(block, &blocks_by_id)?;
+                            let waveform_end_us =
+                                effective_waveform_stop_us(block, start_us, waveform_phase_step)?;
+                            let coalesces_nearby = trigger_mode == "sync-division"
+                                || block.require_complete_periods.unwrap_or(true);
+                            events_by_time_us
+                                .entry(start_us)
+                                .or_default()
+                                .start_actions
+                                .push(build_gpio_waveform_action(
+                                    gpio_id,
+                                    block,
+                                    waveform_phase_step,
+                                )?);
+                            let waveform_stop_event =
+                                events_by_time_us.entry(waveform_end_us).or_default();
+                            waveform_stop_event.coalesces_nearby = coalesces_nearby;
+                            waveform_stop_event
+                                .end_actions
+                                .push(build_gpio_zero_payload_action(gpio_id, GPIO_STOP));
                             gpio_action_count += 2;
                         }
                         _ => {
@@ -696,22 +817,17 @@ mod protocol {
                     row.name
                 )
             })?;
-            let mut next_action_type = GPIO_FORCE_HIGH;
-
-            for pending_actions in events_by_time.values_mut() {
+            if let Some((_time_us, pending_actions)) = events_by_time_us.iter_mut().next() {
                 pending_actions
                     .start_actions
-                    .push(build_gpio_force_action(gpio_id, next_action_type));
+                    .push(build_gpio_zero_payload_action(gpio_id, GPIO_MIRROR_SYNC));
                 gpio_action_count += 1;
-                next_action_type = if next_action_type == GPIO_FORCE_HIGH {
-                    GPIO_FORCE_LOW
-                } else {
-                    GPIO_FORCE_HIGH
-                };
             }
         }
 
-        if events_by_time.is_empty() {
+        let events_by_time_us = coalesce_boundary_events(events_by_time_us);
+
+        if events_by_time_us.is_empty() {
             return Err("The schedule has no events to upload.".to_string());
         }
 
@@ -721,21 +837,17 @@ mod protocol {
             ));
         }
 
-        if events_by_time.len() > MAX_EVENTS {
+        if events_by_time_us.len() > MAX_EVENTS {
             return Err(format!(
                 "Schedule has {} events, but firmware supports {MAX_EVENTS}.",
-                events_by_time.len()
+                events_by_time_us.len()
             ));
         }
 
-        let mut compiled_events = Vec::with_capacity(events_by_time.len());
+        let mut compiled_events = Vec::with_capacity(events_by_time_us.len());
         let mut previous_time_us = None;
 
-        for (index, (time_ms, pending_actions)) in events_by_time.into_iter().enumerate() {
-            let timestamp_us = time_ms
-                .checked_mul(1_000)
-                .ok_or_else(|| "Schedule timestamp exceeds the firmware time range.".to_string())?;
-
+        for (index, (timestamp_us, pending_actions)) in events_by_time_us.into_iter().enumerate() {
             if let Some(previous_time_us) = previous_time_us {
                 let spacing_us = timestamp_us.saturating_sub(previous_time_us);
                 if spacing_us < MIN_EVENT_SPACING_US {
@@ -795,6 +907,47 @@ mod protocol {
         }
 
         Ok(compiled_events)
+    }
+
+    fn coalesce_boundary_events(
+        events_by_time_us: BTreeMap<u64, PendingEventActions>,
+    ) -> BTreeMap<u64, PendingEventActions> {
+        let mut coalesced_events: BTreeMap<u64, PendingEventActions> = BTreeMap::new();
+
+        for (timestamp_us, mut pending_actions) in events_by_time_us {
+            let target_timestamp_us =
+                coalesced_events
+                    .keys()
+                    .next_back()
+                    .copied()
+                    .filter(|last_timestamp_us| {
+                        let distance_us = timestamp_us.saturating_sub(*last_timestamp_us);
+                        let existing_coalesces_nearby = coalesced_events
+                            .get(last_timestamp_us)
+                            .map(|event| event.coalesces_nearby)
+                            .unwrap_or(false);
+
+                        distance_us <= PWM_BOUNDARY_GUARD_US
+                            || (distance_us < MIN_EVENT_SPACING_US
+                                && (pending_actions.coalesces_nearby || existing_coalesces_nearby))
+                    });
+
+            if let Some(target_timestamp_us) = target_timestamp_us {
+                if let Some(existing_actions) = coalesced_events.get_mut(&target_timestamp_us) {
+                    existing_actions.coalesces_nearby |= pending_actions.coalesces_nearby;
+                    existing_actions
+                        .end_actions
+                        .append(&mut pending_actions.end_actions);
+                    existing_actions
+                        .start_actions
+                        .append(&mut pending_actions.start_actions);
+                }
+            } else {
+                coalesced_events.insert(timestamp_us, pending_actions);
+            }
+        }
+
+        coalesced_events
     }
 
     fn map_rows_to_pump_module_ids<'a>(
@@ -943,20 +1096,28 @@ mod protocol {
         row.device_type == "trigger" && row.is_schedule_status.unwrap_or(false)
     }
 
-    fn normalize_ms(value: f64, field_name: &str, block_id: &str) -> Result<u64, String> {
-        if !value.is_finite() {
+    fn normalize_time_us(value_ms: f64, field_name: &str, block_id: &str) -> Result<u64, String> {
+        if !value_ms.is_finite() {
             return Err(format!(
                 "Block {block_id} has a non-finite {field_name} time."
             ));
         }
 
-        if value < 0.0 {
+        if value_ms < 0.0 {
             return Err(format!(
                 "Block {block_id} has a negative {field_name} time."
             ));
         }
 
-        Ok(value.round() as u64)
+        let value_us = (value_ms * 1_000.0).round();
+
+        if value_us > u64::MAX as f64 {
+            return Err(format!(
+                "Block {block_id} has a {field_name} time beyond the firmware range."
+            ));
+        }
+
+        Ok(value_us as u64)
     }
 
     fn flow_rate_ul_min_to_nl_min(value: f64, block_id: &str) -> Result<u32, String> {
@@ -987,15 +1148,15 @@ mod protocol {
         build_action(MODULE_PUMP_PERISTALTIC, module_id, PUMP_SET_STATE, &payload)
     }
 
-    fn build_gpio_force_action(module_id: u8, action_type: u8) -> Vec<u8> {
+    fn build_gpio_zero_payload_action(module_id: u8, action_type: u8) -> Vec<u8> {
         build_action(MODULE_GPIO_FPGA, module_id, action_type, &[])
     }
 
     fn build_gpio_waveform_action(
         module_id: u8,
         block: &SchedulerBlockInput,
+        phase_step: u32,
     ) -> Result<Vec<u8>, String> {
-        let phase_step = frequency_hz_to_phase_step(block.frequency_hz.unwrap_or(1.0), &block.id)?;
         let duty_threshold =
             duty_percent_to_threshold(block.duty_cycle.unwrap_or(50.0), &block.id)?;
         let mut payload = Vec::with_capacity(16);
@@ -1013,6 +1174,127 @@ mod protocol {
             GPIO_SET_WAVEFORM,
             &payload,
         ))
+    }
+
+    fn effective_waveform_stop_us(
+        block: &SchedulerBlockInput,
+        start_us: u64,
+        phase_step: u32,
+    ) -> Result<u64, String> {
+        let requested_duration_ms = block.duration_ms;
+
+        if !block.require_complete_periods.unwrap_or(true) {
+            let duration_us = normalize_time_us(requested_duration_ms, "duration", &block.id)?;
+            return start_us.checked_add(duration_us).ok_or_else(|| {
+                format!(
+                    "Block {} ends beyond the representable time range.",
+                    block.id
+                )
+            });
+        }
+
+        if !requested_duration_ms.is_finite() {
+            return Err(format!("Block {} has a non-finite PWM duration.", block.id));
+        }
+
+        if requested_duration_ms <= 0.0 {
+            return Err(format!("Block {} has zero duration.", block.id));
+        }
+
+        let actual_period_s =
+            (u32::MAX as f64 + 1.0) / (phase_step as f64 * FPGA_PWM_CLOCK_HZ as f64);
+        let requested_duration_s = requested_duration_ms / 1_000.0;
+        let period_count = (requested_duration_s / actual_period_s).round().max(1.0);
+        let boundary_time_s = (start_us as f64 / 1_000_000.0) + period_count * actual_period_s;
+        let boundary_us = (boundary_time_s * 1_000_000.0).round();
+
+        if boundary_us > u64::MAX as f64 {
+            return Err(format!(
+                "Block {} PWM stop time is too large for firmware.",
+                block.id
+            ));
+        }
+
+        let boundary_us = boundary_us as u64;
+        let stop_us = boundary_us.saturating_sub(1).max(start_us + 1);
+
+        if stop_us <= start_us {
+            return Ok(start_us + 1);
+        }
+
+        Ok(stop_us)
+    }
+
+    fn waveform_phase_step(
+        block: &SchedulerBlockInput,
+        blocks_by_id: &HashMap<&str, &SchedulerBlockInput>,
+    ) -> Result<u32, String> {
+        match block.trigger_mode.as_deref().unwrap_or("pulse") {
+            "waveform" => frequency_hz_to_phase_step(block.frequency_hz.unwrap_or(1.0), &block.id),
+            "sync-division" => {
+                let source_block_id = block.sync_source_block_id.as_deref().ok_or_else(|| {
+                    format!(
+                        "Block {} needs a source PWM block for synchronized mode.",
+                        block.id
+                    )
+                })?;
+
+                if source_block_id == block.id {
+                    return Err(format!("Block {} cannot synchronize to itself.", block.id));
+                }
+
+                let source_block = blocks_by_id.get(source_block_id).copied().ok_or_else(|| {
+                    format!(
+                        "Block {} references missing source PWM block {}.",
+                        block.id, source_block_id
+                    )
+                })?;
+
+                if source_block.trigger_mode.as_deref() != Some("waveform") {
+                    return Err(format!(
+                        "Block {} synchronized source must be a PWM waveform block.",
+                        block.id
+                    ));
+                }
+
+                let multiplier = normalize_period_multiplier(block.period_multiplier, &block.id)?;
+                let source_phase_step = frequency_hz_to_phase_step(
+                    source_block.frequency_hz.unwrap_or(1.0),
+                    &source_block.id,
+                )?;
+
+                if source_phase_step % multiplier != 0 {
+                    return Err(format!(
+                        "Block {} period multiplier {} is not exactly representable from source phase step {}.",
+                        block.id, multiplier, source_phase_step
+                    ));
+                }
+
+                Ok(source_phase_step / multiplier)
+            }
+            mode => Err(format!(
+                "Block {} has unsupported waveform mode '{}'.",
+                block.id, mode
+            )),
+        }
+    }
+
+    fn normalize_period_multiplier(value: Option<f64>, block_id: &str) -> Result<u32, String> {
+        let value = value.unwrap_or(2.0);
+
+        if !value.is_finite() || value < 1.0 {
+            return Err(format!(
+                "Block {block_id} synchronized multiplier must be at least 1."
+            ));
+        }
+
+        if value > u32::MAX as f64 {
+            return Err(format!(
+                "Block {block_id} synchronized multiplier is too large."
+            ));
+        }
+
+        Ok(value.round() as u32)
     }
 
     fn frequency_hz_to_phase_step(value: f64, block_id: &str) -> Result<u32, String> {
@@ -1056,7 +1338,8 @@ mod protocol {
             return Ok(u32::MAX);
         }
 
-        Ok(((value / 100.0) * (u32::MAX as f64 + 1.0)).floor() as u32)
+        let threshold = ((value / 100.0) * (u32::MAX as f64 + 1.0)).round();
+        Ok(threshold.clamp(0.0, u32::MAX as f64) as u32)
     }
 
     fn build_action(
@@ -1260,7 +1543,7 @@ mod protocol {
                         continue;
                     }
 
-                    if let Some(error) = protocol_error_for_seq(&frame, seq) {
+                    if let Some(error) = protocol_error_for_seq(&frame, seq, label) {
                         return Err(error);
                     }
 
@@ -1304,6 +1587,17 @@ mod protocol {
                 msg_type: frame.msg_type,
                 bytes: bytes_to_hex(&frame.raw_bytes),
                 detail: describe_frame(frame),
+            });
+        }
+
+        fn log_note(&mut self, detail: &str) {
+            self.log.push(SerialLogEntry {
+                direction: "info".to_string(),
+                label: "UPLOAD_RETRY".to_string(),
+                seq: 0,
+                msg_type: 0,
+                bytes: String::new(),
+                detail: detail.to_string(),
             });
         }
     }
@@ -1423,7 +1717,7 @@ mod protocol {
             && frame.payload[2] == ACK_OK
     }
 
-    fn protocol_error_for_seq(frame: &Frame, seq: u16) -> Option<String> {
+    fn protocol_error_for_seq(frame: &Frame, seq: u16, label: &str) -> Option<String> {
         if frame.msg_type != MSG_ERROR || frame.payload.len() != 4 {
             return None;
         }
@@ -1435,38 +1729,69 @@ mod protocol {
 
         let error_code = frame.payload[2];
         let detail = frame.payload[3];
-        Some(format!(
-            "Device returned protocol error {} (code 0x{error_code:02X}, detail 0x{detail:02X}).",
-            protocol_error_name(error_code)
-        ))
+        Some(format_protocol_error(label, error_code, detail))
+    }
+
+    fn is_pump_offload_error(error: &str) -> bool {
+        error.contains("(ERR_BAD_MODULE 0x07)") && error.contains("Pump offload failed")
+    }
+
+    fn format_protocol_error(label: &str, error_code: u8, detail: u8) -> String {
+        if label == "START_SCHEDULE" && error_code == 0x07 {
+            return format!(
+                "Pump offload failed for pump card slot {detail} (ERR_BAD_MODULE 0x07)."
+            );
+        }
+
+        let error_name = protocol_error_name(error_code);
+        let error_description = protocol_error_description(error_code);
+
+        if detail == 0 {
+            format!(
+                "Firmware rejected {label}: {error_description} ({error_name} 0x{error_code:02X})."
+            )
+        } else {
+            format!(
+                "Firmware rejected {label}: {error_description}, detail 0x{detail:02X} ({error_name} 0x{error_code:02X})."
+            )
+        }
     }
 
     fn protocol_error_name(error_code: u8) -> &'static str {
         match error_code {
+            0x01 => "ERR_BAD_CRC",
+            0x02 => "ERR_BAD_VERSION",
+            0x03 => "ERR_BAD_LENGTH",
+            0x04 => "ERR_UNKNOWN_MSG",
+            0x05 => "ERR_SCHEDULE_FULL",
+            0x06 => "ERR_BAD_EVENT",
+            0x07 => "ERR_BAD_MODULE",
+            0x08 => "ERR_BAD_ACTION",
+            0x09 => "ERR_BUSY_RUNNING",
+            _ => "ERR_UNKNOWN",
+        }
+    }
+
+    fn protocol_error_description(error_code: u8) -> &'static str {
+        match error_code {
             0x01 => "bad CRC",
-            0x02 => "bad version",
-            0x03 => "bad length",
-            0x04 => "unknown message",
-            0x05 => "schedule full",
-            0x06 => "bad event",
-            0x07 => "bad module",
-            0x08 => "bad action",
-            0x09 => "busy running",
-            _ => "unknown error",
+            0x02 => "unsupported protocol version",
+            0x03 => "bad payload length",
+            0x04 => "unknown command",
+            0x05 => "schedule memory is full",
+            0x06 => "bad schedule event",
+            0x07 => "bad or missing module",
+            0x08 => "bad module action",
+            0x09 => "scheduler is busy running",
+            _ => "unknown protocol error",
         }
     }
 
     fn format_unexpected_response(context: &str, frames: &[Frame]) -> String {
-        let details = frames
-            .iter()
-            .map(describe_frame)
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        if details.is_empty() {
+        if frames.is_empty() {
             context.to_string()
         } else {
-            format!("{context}: received {details}.")
+            format!("{context}. See the serial console for firmware frame details.")
         }
     }
 

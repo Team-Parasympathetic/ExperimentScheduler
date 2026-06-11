@@ -19,15 +19,27 @@ import {
   getFirmwareScheduleSummary,
 } from "@/lib/firmware-constraints";
 import {
+  DEFAULT_SCHEDULE_BLOCKS,
+  DEFAULT_SCHEDULE_FILE,
+  DEFAULT_SCHEDULE_ROWS,
+} from "@/lib/default-schedule";
+import {
   getHardwareShortLabel,
   isHardwareIdInUse,
 } from "@/lib/hardware-bindings";
 import {
   DEFAULT_TRIGGER_DUTY_CYCLE,
   DEFAULT_TRIGGER_FREQUENCY_HZ,
+  DEFAULT_REQUIRE_COMPLETE_PERIODS,
+  DEFAULT_PERIOD_MULTIPLIER,
   DEFAULT_TRIGGER_MODE,
+  getCompletePeriodDurationMs,
+  getBinaryRepresentableDutyCycle,
+  getDerivedFrequencyHz,
   normalizeDutyCycle,
   normalizeFrequencyHz,
+  normalizePeriodMultiplier,
+  normalizeRequireCompletePeriods,
 } from "@/lib/trigger-output";
 import { clamp, createId } from "@/lib/utils";
 import type {
@@ -72,6 +84,7 @@ interface SchedulerState {
   selectedBlockId: string | null;
   selectedBlockIds: string[];
   selectionAnchorBlockId: string | null;
+  syncSourcePickTargetBlockId: string | null;
   selectedRowId: string | null;
   pasteTargetStartMs: number | null;
   gridSizeMs: number;
@@ -85,11 +98,12 @@ interface SchedulerState {
     blockId: string | null,
     options?: { additive?: boolean; range?: boolean },
   ) => void;
+  setSyncSourcePickTargetBlock: (blockId: string | null) => void;
   setPasteTarget: (rowId: string, startMs?: number | null) => void;
   setGridSizeMs: (gridSizeMs: number) => void;
   setZoomPxPerMinute: (zoomPxPerMinute: number) => void;
   setExperimentDurationMs: (experimentDurationMs: number) => void;
-  startExperiment: () => void;
+  startExperiment: (playheadStartMs?: number) => void;
   stopExperiment: () => void;
   resetExperiment: () => void;
   undo: () => void;
@@ -125,38 +139,8 @@ interface SchedulerState {
   deleteBlocks: (blockIds: string[]) => void;
 }
 
-const initialRows: Row[] = [
-  {
-    id: "row-a",
-    name: "Pump 0",
-    deviceType: "peristaltic",
-    hardwareId: null,
-    pumpRateMode: "variable",
-  },
-  { id: "row-b", name: "PWM 0", deviceType: "trigger", hardwareId: null },
-];
-
-const initialBlocks: Block[] = [
-  {
-    id: "blk-1",
-    rowId: "row-a",
-    startMs: 1_000,
-    durationMs: 2 * SECOND_MS,
-    direction: "forward",
-    flowRate: 400,
-  },
-  {
-    id: "blk-2",
-    rowId: "row-b",
-    startMs: 4_500,
-    durationMs: 2_500,
-    direction: "forward",
-    flowRate: 400,
-    triggerMode: DEFAULT_TRIGGER_MODE,
-    frequencyHz: DEFAULT_TRIGGER_FREQUENCY_HZ,
-    dutyCycle: DEFAULT_TRIGGER_DUTY_CYCLE,
-  },
-];
+const initialRows: Row[] = DEFAULT_SCHEDULE_ROWS.map((row) => ({ ...row }));
+const initialBlocks: Block[] = DEFAULT_SCHEDULE_BLOCKS.map((block) => ({ ...block }));
 
 function getNextRowName(rows: Row[], deviceType: DeviceType) {
   const typeIndex = rows.filter((row) => row.deviceType === deviceType).length;
@@ -193,6 +177,26 @@ function normalizeLoadedRows(rows: Row[]): Row[] {
           pumpRateMode: undefined,
         },
   );
+}
+
+function normalizeLoadedBlocks(blocks: Block[], rows: Row[]): Block[] {
+  const rowsById = new Map(rows.map((row) => [row.id, row]));
+
+  return blocks.map((block) => {
+    if (rowsById.get(block.rowId)?.deviceType !== "trigger") {
+      return block;
+    }
+
+    return {
+      ...block,
+      triggerMode: normalizeTriggerMode(block.triggerMode),
+      frequencyHz: normalizeFrequencyHz(block.frequencyHz ?? DEFAULT_TRIGGER_FREQUENCY_HZ),
+      dutyCycle: normalizeDutyCycle(block.dutyCycle ?? DEFAULT_TRIGGER_DUTY_CYCLE),
+      requireCompletePeriods: normalizeRequireCompletePeriods(block.requireCompletePeriods),
+      syncSourceBlockId: block.syncSourceBlockId ?? null,
+      periodMultiplier: normalizePeriodMultiplier(block.periodMultiplier),
+    };
+  });
 }
 
 function normalizeTimeValue(value: number | undefined, fallback: number, minimum: number) {
@@ -358,10 +362,8 @@ function assignPumpRowsByDetectedHardware(rows: Row[], availablePumpHardwareIds:
   });
 }
 
-function normalizeTriggerMode(triggerMode: TriggerMode | undefined): TriggerMode {
-  return triggerMode === "rising" ||
-    triggerMode === "falling" ||
-    triggerMode === "waveform"
+function normalizeTriggerMode(triggerMode: string | undefined): TriggerMode {
+  return triggerMode === "waveform" || triggerMode === "sync-division"
     ? triggerMode
     : DEFAULT_TRIGGER_MODE;
 }
@@ -382,6 +384,9 @@ function createDefaultBlock(row: Row, startMs: number, durationMs: number): Bloc
       triggerMode: DEFAULT_TRIGGER_MODE,
       frequencyHz: DEFAULT_TRIGGER_FREQUENCY_HZ,
       dutyCycle: DEFAULT_TRIGGER_DUTY_CYCLE,
+      requireCompletePeriods: DEFAULT_REQUIRE_COMPLETE_PERIODS,
+      syncSourceBlockId: null,
+      periodMultiplier: DEFAULT_PERIOD_MULTIPLIER,
     };
   }
 
@@ -878,12 +883,13 @@ function withHistory<T extends Partial<SchedulerState>>(
 
 const initialExperimentDurationMs = getScheduleDuration(
   initialBlocks,
-  DEFAULT_EXPERIMENT_DURATION_MS,
+  DEFAULT_SCHEDULE_FILE.experimentDurationMs,
 );
 
 export const useSchedulerStore = create<SchedulerState>((set) => ({
   rows: initialRows,
   blocks: initialBlocks,
+  syncSourcePickTargetBlockId: null,
   availablePumpHardwareIds: [],
   past: [],
   future: [],
@@ -903,24 +909,31 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
   setSelectedBlock: (blockId, options = {}) =>
     set((state) =>
       blockId
-        ? getSelectionForBlock({
-            additive: options.additive,
-            anchorBlockId: state.selectionAnchorBlockId,
-            blockId,
-            blocks: state.blocks,
-            currentBlockIds: state.selectedBlockIds,
-            range: options.range,
-          })
+        ? {
+            ...getSelectionForBlock({
+              additive: options.additive,
+              anchorBlockId: state.selectionAnchorBlockId,
+              blockId,
+              blocks: state.blocks,
+              currentBlockIds: state.selectedBlockIds,
+              range: options.range,
+            }),
+            syncSourcePickTargetBlockId: null,
+          }
         : {
             selectedBlockId: null,
             selectedBlockIds: [],
             selectionAnchorBlockId: null,
+            syncSourcePickTargetBlockId: null,
           },
     ),
+  setSyncSourcePickTargetBlock: (syncSourcePickTargetBlockId) =>
+    set({ syncSourcePickTargetBlockId }),
   setPasteTarget: (selectedRowId, startMs = null) =>
     set({
       selectedRowId,
       pasteTargetStartMs: startMs,
+      syncSourcePickTargetBlockId: null,
     }),
   setGridSizeMs: (gridSizeMs) =>
     set((state) =>
@@ -949,7 +962,7 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
         ...getPlayheadSnapshot(state, nextExperimentDurationMs, nowMs),
       });
     }),
-  startExperiment: () =>
+  startExperiment: (playheadStartMs) =>
     set((state) => {
       if (state.experimentState === "running") {
         return state;
@@ -957,7 +970,9 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
 
       const nowMs = Date.now();
       const nextPlayheadMs =
-        state.playheadMs >= state.experimentDurationMs
+        playheadStartMs !== undefined
+          ? clamp(playheadStartMs, 0, state.experimentDurationMs)
+          : state.playheadMs >= state.experimentDurationMs
           ? 0
           : clamp(state.playheadMs, 0, state.experimentDurationMs);
 
@@ -1091,16 +1106,18 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
     }),
   loadSchedule: (schedule) =>
     set((state) => {
+      const nextRows = normalizeLoadedRows(schedule.rows);
+      const nextBlocks = normalizeLoadedBlocks(schedule.blocks, nextRows);
       const nextExperimentDurationMs = getScheduleDuration(
-        schedule.blocks,
+        nextBlocks,
         schedule.experimentDurationMs,
       );
 
-      const selectedBlock = schedule.blocks[0] ?? null;
+      const selectedBlock = nextBlocks[0] ?? null;
 
       return withHistory(state, {
-        rows: normalizeLoadedRows(schedule.rows),
-        blocks: schedule.blocks,
+        rows: nextRows,
+        blocks: nextBlocks,
         gridSizeMs: Math.max(
           FIRMWARE_SCHEDULE_LIMITS.minEventSpacingMs,
           Math.round(schedule.gridSizeMs),
@@ -1484,6 +1501,73 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
         }
 
         const isTriggerBlock = requestedRow?.deviceType === "trigger";
+        const nextTriggerMode = isTriggerBlock
+          ? normalizeTriggerMode(patch.triggerMode ?? block.triggerMode)
+          : block.triggerMode;
+        const nextFrequencyHz = isTriggerBlock
+          ? normalizeFrequencyHz(
+              patch.frequencyHz ?? block.frequencyHz ?? DEFAULT_TRIGGER_FREQUENCY_HZ,
+            )
+          : block.frequencyHz;
+        let nextDutyCycle = isTriggerBlock
+          ? normalizeDutyCycle(patch.dutyCycle ?? block.dutyCycle ?? DEFAULT_TRIGGER_DUTY_CYCLE)
+          : block.dutyCycle;
+        const nextRequireCompletePeriods = isTriggerBlock
+          ? normalizeRequireCompletePeriods(
+              patch.requireCompletePeriods ?? block.requireCompletePeriods,
+            )
+          : block.requireCompletePeriods;
+        const nextPeriodMultiplier = isTriggerBlock
+          ? normalizePeriodMultiplier(patch.periodMultiplier ?? block.periodMultiplier)
+          : block.periodMultiplier;
+
+        if (
+          isTriggerBlock &&
+          nextTriggerMode === "waveform" &&
+          nextRequireCompletePeriods
+        ) {
+          nextDurationMs = getCompletePeriodDurationMs(
+            nextDurationMs,
+            nextFrequencyHz ?? 1,
+            nextStartMs,
+          );
+        }
+
+        if (
+          isTriggerBlock &&
+          (nextTriggerMode === "waveform" || nextTriggerMode === "sync-division")
+        ) {
+          nextDutyCycle = getBinaryRepresentableDutyCycle(
+            nextDutyCycle ?? DEFAULT_TRIGGER_DUTY_CYCLE,
+          );
+        }
+
+        if (isTriggerBlock && nextTriggerMode === "sync-division") {
+          const nextSourceBlockId =
+            patch.syncSourceBlockId !== undefined
+              ? patch.syncSourceBlockId
+              : block.syncSourceBlockId ?? null;
+          const sourceBlock = nextSourceBlockId
+            ? state.blocks.find((item) => item.id === nextSourceBlockId) ?? null
+            : null;
+          const derivedFrequencyHz =
+            sourceBlock?.triggerMode === "waveform"
+              ? getDerivedFrequencyHz(
+                  normalizeFrequencyHz(
+                    sourceBlock.frequencyHz ?? DEFAULT_TRIGGER_FREQUENCY_HZ,
+                  ),
+                  nextPeriodMultiplier,
+                )
+              : null;
+
+          if (derivedFrequencyHz !== null) {
+            nextDurationMs = getCompletePeriodDurationMs(
+              nextDurationMs,
+              derivedFrequencyHz,
+              nextStartMs,
+            );
+          }
+        }
 
         return {
           ...block,
@@ -1495,17 +1579,16 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
             patch.flowRate === undefined
               ? block.flowRate
               : normalizeFlowRate(patch.flowRate),
-          triggerMode: isTriggerBlock
-            ? normalizeTriggerMode(patch.triggerMode ?? block.triggerMode)
-            : block.triggerMode,
-          frequencyHz: isTriggerBlock
-            ? normalizeFrequencyHz(
-                patch.frequencyHz ?? block.frequencyHz ?? DEFAULT_TRIGGER_FREQUENCY_HZ,
-              )
-            : block.frequencyHz,
-          dutyCycle: isTriggerBlock
-            ? normalizeDutyCycle(patch.dutyCycle ?? block.dutyCycle ?? DEFAULT_TRIGGER_DUTY_CYCLE)
-            : block.dutyCycle,
+          triggerMode: nextTriggerMode,
+          frequencyHz: nextFrequencyHz,
+          dutyCycle: nextDutyCycle,
+          requireCompletePeriods: nextRequireCompletePeriods,
+          syncSourceBlockId: isTriggerBlock
+            ? patch.syncSourceBlockId !== undefined
+              ? patch.syncSourceBlockId
+              : block.syncSourceBlockId ?? null
+            : block.syncSourceBlockId,
+          periodMultiplier: nextPeriodMultiplier,
         };
       });
       const nextExperimentDurationMs = getScheduleDuration(

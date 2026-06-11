@@ -41,3 +41,7 @@ export function startBoardSchedule(portName: string) {
 export function stopBoardSchedule(portName: string) {
   return invoke<BoardCommandResult>("stop_schedule", { portName });
 }
+
+export function getBoardStatus(portName: string) {
+  return invoke<BoardCommandResult>("get_status", { portName });
+}

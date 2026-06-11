@@ -1,4 +1,10 @@
-import { DEFAULT_TRIGGER_MODE } from "@/lib/trigger-output";
+import {
+  DEFAULT_TRIGGER_MODE,
+  getCompletePeriodDurationMs,
+  getDerivedFrequencyHz,
+  normalizeFrequencyHz,
+  normalizeRequireCompletePeriods,
+} from "@/lib/trigger-output";
 import type { Block, Row } from "@/types/scheduler";
 
 export const FIRMWARE_SCHEDULE_LIMITS = {
@@ -11,9 +17,12 @@ export const FIRMWARE_SCHEDULE_LIMITS = {
   maxProtocolPayloadBytes: 256,
   eventHeaderBytes: 13,
   pumpActionRecordBytes: 12,
-  gpioForceActionRecordBytes: 4,
+  gpioZeroPayloadActionRecordBytes: 4,
   gpioWaveformActionRecordBytes: 20,
 } as const;
+
+const PWM_BOUNDARY_GUARD_US = 1;
+const MIN_EVENT_SPACING_US = FIRMWARE_SCHEDULE_LIMITS.minEventSpacingMs * 1_000;
 
 export interface FirmwareEventSummary {
   timeMs: number;
@@ -21,6 +30,7 @@ export interface FirmwareEventSummary {
   actionBytes: number;
   pumpActionCount: number;
   gpioActionCount: number;
+  coalescesNearby?: boolean;
 }
 
 export interface FirmwareScheduleSummary {
@@ -54,9 +64,47 @@ function addTransition(
   timeMs: number,
   actionBytes: number,
   actionKind: "pump" | "gpio",
+  options: { coalescesNearby?: boolean } = {},
 ) {
-  const normalizedTimeMs = Math.max(0, Math.round(timeMs));
-  const existingEvent = eventsByTime.get(normalizedTimeMs);
+  const normalizedTimeUs = Math.max(0, Math.round(timeMs * 1_000));
+  const coalescedTimeUs =
+    Array.from(eventsByTime.keys()).reduce<number | null>(
+      (bestTimeUs, existingTimeUs) => {
+        const existingEvent = eventsByTime.get(existingTimeUs);
+        const distanceUs = Math.abs(existingTimeUs - normalizedTimeUs);
+        const canCoalesce =
+          distanceUs <= PWM_BOUNDARY_GUARD_US ||
+          (distanceUs < MIN_EVENT_SPACING_US &&
+            (options.coalescesNearby || existingEvent?.coalescesNearby));
+
+        if (!canCoalesce) {
+          return bestTimeUs;
+        }
+
+        if (bestTimeUs === null) {
+          return existingTimeUs;
+        }
+
+        const bestDistanceUs = Math.abs(bestTimeUs - normalizedTimeUs);
+        return distanceUs < bestDistanceUs ? existingTimeUs : bestTimeUs;
+      },
+      null,
+    ) ?? normalizedTimeUs;
+  const eventTimeUs = Math.min(coalescedTimeUs, normalizedTimeUs);
+
+  if (eventTimeUs !== coalescedTimeUs) {
+    const existingEvent = eventsByTime.get(coalescedTimeUs);
+    if (existingEvent) {
+      eventsByTime.delete(coalescedTimeUs);
+      existingEvent.timeMs = eventTimeUs / 1_000;
+      existingEvent.coalescesNearby =
+        existingEvent.coalescesNearby || options.coalescesNearby;
+      eventsByTime.set(eventTimeUs, existingEvent);
+    }
+  }
+
+  const normalizedTimeMs = eventTimeUs / 1_000;
+  const existingEvent = eventsByTime.get(eventTimeUs);
 
   if (existingEvent) {
     existingEvent.actionCount += 1;
@@ -68,15 +116,19 @@ function addTransition(
       existingEvent.pumpActionCount += 1;
     }
 
+    existingEvent.coalescesNearby =
+      existingEvent.coalescesNearby || options.coalescesNearby;
+
     return;
   }
 
-  eventsByTime.set(normalizedTimeMs, {
+  eventsByTime.set(eventTimeUs, {
     timeMs: normalizedTimeMs,
     actionCount: 1,
     actionBytes,
     pumpActionCount: actionKind === "pump" ? 1 : 0,
     gpioActionCount: actionKind === "gpio" ? 1 : 0,
+    coalescesNearby: options.coalescesNearby,
   });
 }
 
@@ -99,7 +151,34 @@ export function getFirmwareScheduleSummary(
     }
 
     if (row?.deviceType === "trigger") {
-      if ((block.triggerMode ?? DEFAULT_TRIGGER_MODE) === "waveform") {
+      const triggerMode = block.triggerMode ?? DEFAULT_TRIGGER_MODE;
+      if (triggerMode === "waveform" || triggerMode === "sync-division") {
+        const sourceBlock =
+          triggerMode === "sync-division" && block.syncSourceBlockId
+            ? blocks.find((item) => item.id === block.syncSourceBlockId) ?? null
+            : null;
+        const derivedFrequencyHz =
+          sourceBlock?.triggerMode === "waveform"
+            ? getDerivedFrequencyHz(
+                normalizeFrequencyHz(sourceBlock.frequencyHz ?? 1),
+                block.periodMultiplier,
+              )
+            : null;
+        const waveformFrequencyHz =
+          triggerMode === "sync-division"
+            ? derivedFrequencyHz
+            : normalizeFrequencyHz(block.frequencyHz ?? 1);
+        const usesCompletePeriodStop =
+          waveformFrequencyHz !== null &&
+          (triggerMode === "sync-division" ||
+            normalizeRequireCompletePeriods(block.requireCompletePeriods));
+        const durationMs = usesCompletePeriodStop
+          ? getCompletePeriodDurationMs(
+              block.durationMs,
+              waveformFrequencyHz,
+              block.startMs,
+            )
+          : block.durationMs;
         addTransition(
           eventsByTime,
           block.startMs,
@@ -108,15 +187,22 @@ export function getFirmwareScheduleSummary(
         );
         addTransition(
           eventsByTime,
-          block.startMs + block.durationMs,
-          FIRMWARE_SCHEDULE_LIMITS.gpioForceActionRecordBytes,
+          block.startMs + durationMs,
+          FIRMWARE_SCHEDULE_LIMITS.gpioZeroPayloadActionRecordBytes,
           "gpio",
+          { coalescesNearby: usesCompletePeriodStop },
         );
       } else {
         addTransition(
           eventsByTime,
           block.startMs,
-          FIRMWARE_SCHEDULE_LIMITS.gpioForceActionRecordBytes,
+          FIRMWARE_SCHEDULE_LIMITS.gpioZeroPayloadActionRecordBytes,
+          "gpio",
+        );
+        addTransition(
+          eventsByTime,
+          block.startMs + block.durationMs,
+          FIRMWARE_SCHEDULE_LIMITS.gpioZeroPayloadActionRecordBytes,
           "gpio",
         );
       }
@@ -139,16 +225,13 @@ export function getFirmwareScheduleSummary(
   }
 
   if (scheduleStatusRows.length === 1 && eventsByTime.size > 0) {
-    const eventTimes = Array.from(eventsByTime.keys());
-
-    for (const eventTime of eventTimes) {
-      addTransition(
-        eventsByTime,
-        eventTime,
-        FIRMWARE_SCHEDULE_LIMITS.gpioForceActionRecordBytes,
-        "gpio",
-      );
-    }
+    const firstEventTime = Math.min(...Array.from(eventsByTime.keys()));
+    addTransition(
+      eventsByTime,
+      firstEventTime / 1_000,
+      FIRMWARE_SCHEDULE_LIMITS.gpioZeroPayloadActionRecordBytes,
+      "gpio",
+    );
   }
 
   const events = Array.from(eventsByTime.values()).sort((left, right) => left.timeMs - right.timeMs);

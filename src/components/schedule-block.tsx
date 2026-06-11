@@ -27,6 +27,9 @@ interface ScheduleBlockProps {
   width: number;
   shadeIndex: number;
   isSelected: boolean;
+  isGuideObscured?: boolean;
+  isDimmed?: boolean;
+  isSyncSourceCandidate?: boolean;
   onSelect: (event: ReactMouseEvent<HTMLDivElement>) => void;
   onContextMenu: (event: ReactMouseEvent<HTMLDivElement>) => void;
   onPointerDownMove: (event: ReactPointerEvent<HTMLDivElement>) => void;
@@ -36,11 +39,11 @@ interface ScheduleBlockProps {
 
 function TriggerGlyph({ mode }: { mode: TriggerMode }) {
   const path =
-    mode === "rising"
-      ? "M3 13 H7 V5 H15"
-      : mode === "falling"
-      ? "M3 5 H9 V13 H15"
-      : "M3 13 H6 V5 H10 V13 H14 V5 H17";
+    mode === "pulse"
+      ? "M3 13 H6 V5 H14 V13 H17"
+      : mode === "sync-division"
+        ? "M3 5 H7 V13 H11 V5 H17 M7 16 H17"
+        : "M3 13 H6 V5 H10 V13 H14 V5 H17";
 
   return (
     <div
@@ -76,6 +79,9 @@ function getEstimatedTextWidth(text: string, averageCharacterWidth = 7) {
 export function ScheduleBlock({
   block,
   row,
+  isGuideObscured = false,
+  isDimmed = false,
+  isSyncSourceCandidate = false,
   isSelected,
   left,
   onContextMenu,
@@ -104,13 +110,17 @@ export function ScheduleBlock({
     : "Reverse";
   const secondaryLabel =
     isTrigger && triggerMode === "waveform"
-      ? `${getTriggerFrequencyLabel(block.frequencyHz)} @ ${normalizeDutyCycle(
-          block.dutyCycle ?? 50,
+      ? `${getTriggerFrequencyLabel(block.frequencyHz)} @ ${formatNumber(
+          normalizeDutyCycle(block.dutyCycle ?? 50),
+          2,
+        )}%`
+      : isTrigger && triggerMode === "sync-division"
+      ? `x${block.periodMultiplier ?? 2} @ ${formatNumber(
+          normalizeDutyCycle(block.dutyCycle ?? 50),
+          2,
         )}%`
       : isTrigger
-      ? triggerMode === "rising"
-        ? "High at start"
-        : "Low at start"
+      ? "High until stop"
       : isFixedRatePump
       ? `${formatNumber(getFixedPumpVolumeForDuration(block.durationMs, fixedFit), 1)} uL @ ${getFlowRateLabel(
           getFixedPumpFlowRateForDuration(block.durationMs, fixedFit),
@@ -145,7 +155,7 @@ export function ScheduleBlock({
     <div
       data-block-root="true"
       className={cn(
-        "absolute top-1.5 flex h-[52px] min-w-0 touch-none select-none flex-col justify-between overflow-visible rounded-xl border text-left shadow-[0_14px_28px_-22px_rgba(15,23,42,0.28)] transition-colors",
+        "absolute top-1.5 z-20 flex h-[52px] min-w-0 touch-none select-none flex-col justify-between overflow-visible rounded-xl border text-left shadow-[0_14px_28px_-22px_rgba(15,23,42,0.28)] transition-colors",
         showHeader ? "cursor-grab px-3 py-2 active:cursor-grabbing" : "cursor-grab p-0 active:cursor-grabbing",
         isTrigger
           ? isAlternateShade
@@ -156,6 +166,9 @@ export function ScheduleBlock({
             : "border-orange-200 bg-[linear-gradient(180deg,rgba(255,247,237,0.98),rgba(254,215,170,0.92))] text-slate-800",
         isSelected &&
           "shadow-[0_0_0_1px_rgba(14,165,233,0.42),0_0_18px_rgba(14,165,233,0.48),0_0_34px_rgba(14,165,233,0.28)]",
+        isDimmed && "opacity-25 saturate-50",
+        isSyncSourceCandidate &&
+          "shadow-[0_0_0_1px_rgba(16,185,129,0.65),0_0_20px_rgba(16,185,129,0.45)]",
       )}
       style={{
         left,
@@ -196,7 +209,10 @@ export function ScheduleBlock({
       {showHeader ? (
         <>
           <div
-            className="pointer-events-none absolute left-3 top-2 flex min-w-0 flex-col"
+            className={cn(
+              "pointer-events-none absolute left-3 top-2 flex min-w-0 flex-col transition-[filter,opacity]",
+              isGuideObscured && "blur-[1.5px] opacity-35",
+            )}
             style={{ right: leftTextRightInset }}
           >
               <div className="truncate text-[9px] font-semibold uppercase leading-[1.05] tracking-[0.18em] text-slate-500">
@@ -214,7 +230,10 @@ export function ScheduleBlock({
 
           {showFooter ? (
             <div
-              className="pointer-events-none absolute bottom-2 flex items-center justify-end overflow-hidden text-[9px] leading-none"
+              className={cn(
+                "pointer-events-none absolute bottom-2 flex items-center justify-end overflow-hidden text-[9px] leading-none transition-[filter,opacity]",
+                isGuideObscured && "blur-[1.5px] opacity-35",
+              )}
               style={{
                 maxWidth: badgeMaxWidth,
                 right: badgeRightOffset,

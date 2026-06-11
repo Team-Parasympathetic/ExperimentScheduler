@@ -13,11 +13,14 @@ import {
   formatTimelineTime,
   getDeviceTypeLabel,
 } from "@/lib/time";
-import { getBlockContext } from "@/lib/schedule";
+import { getBlockContext, getSortedRowBlocks } from "@/lib/schedule";
 import {
   DEFAULT_TRIGGER_DUTY_CYCLE,
   DEFAULT_TRIGGER_FREQUENCY_HZ,
+  DEFAULT_REQUIRE_COMPLETE_PERIODS,
+  DEFAULT_PERIOD_MULTIPLIER,
   DEFAULT_TRIGGER_MODE,
+  getDerivedFrequencyHz,
   getDutyCycleFromHighTimeMs,
   getHighTimeMsFromDutyCycle,
   getPeriodMsFromFrequencyHz,
@@ -25,6 +28,8 @@ import {
   getFrequencyHzFromPeriodMs,
   normalizeDutyCycle,
   normalizeFrequencyHz,
+  normalizePeriodMultiplier,
+  normalizeRequireCompletePeriods,
 } from "@/lib/trigger-output";
 import { useSchedulerStore } from "@/store/scheduler-store";
 import type { TriggerMode } from "@/types/scheduler";
@@ -35,6 +40,12 @@ export function InspectorPanel() {
   const selectedBlockId = useSchedulerStore((state) => state.selectedBlockId);
   const updateBlock = useSchedulerStore((state) => state.updateBlock);
   const deleteBlock = useSchedulerStore((state) => state.deleteBlock);
+  const setSyncSourcePickTargetBlock = useSchedulerStore(
+    (state) => state.setSyncSourcePickTargetBlock,
+  );
+  const syncSourcePickTargetBlockId = useSchedulerStore(
+    (state) => state.syncSourcePickTargetBlockId,
+  );
   const gridSizeMs = useSchedulerStore((state) => state.gridSizeMs);
 
   const blockContext = getBlockContext(rows, blocks, selectedBlockId);
@@ -49,9 +60,39 @@ export function InspectorPanel() {
   const triggerDutyCycle = normalizeDutyCycle(
     block?.dutyCycle ?? DEFAULT_TRIGGER_DUTY_CYCLE,
   );
+  const requireCompletePeriods = normalizeRequireCompletePeriods(
+    block?.requireCompletePeriods ?? DEFAULT_REQUIRE_COMPLETE_PERIODS,
+  );
   const triggerPeriodMs = getPeriodMsFromFrequencyHz(triggerFrequencyHz);
+  const syncSourceBlock =
+    block?.syncSourceBlockId
+      ? blocks.find((item) => item.id === block.syncSourceBlockId) ?? null
+      : null;
+  const syncSourceRow = rows.find((item) => item.id === syncSourceBlock?.rowId) ?? null;
+  const syncSourceBlockIndex =
+    syncSourceBlock && syncSourceRow
+      ? getSortedRowBlocks(blocks, syncSourceRow.id).findIndex(
+          (item) => item.id === syncSourceBlock.id,
+        )
+      : -1;
+  const syncSourceLabel =
+    syncSourceBlock && syncSourceRow && syncSourceBlockIndex >= 0
+      ? `${syncSourceRow.name} block ${syncSourceBlockIndex}`
+      : null;
+  const syncSourceFrequencyHz = normalizeFrequencyHz(
+    syncSourceBlock?.frequencyHz ?? DEFAULT_TRIGGER_FREQUENCY_HZ,
+  );
+  const periodMultiplier = normalizePeriodMultiplier(
+    block?.periodMultiplier ?? DEFAULT_PERIOD_MULTIPLIER,
+  );
+  const derivedFrequencyHz =
+    triggerMode === "sync-division"
+      ? getDerivedFrequencyHz(syncSourceFrequencyHz, periodMultiplier)
+      : null;
+  const derivedPeriodMs =
+    derivedFrequencyHz === null ? null : getPeriodMsFromFrequencyHz(derivedFrequencyHz);
   const triggerHighTimeMs = getHighTimeMsFromDutyCycle(
-    triggerFrequencyHz,
+    derivedFrequencyHz ?? triggerFrequencyHz,
     triggerDutyCycle,
   );
   const gridSizeSeconds = gridSizeMs / 1_000;
@@ -172,14 +213,28 @@ export function InspectorPanel() {
                       })
                     }
                   >
-                    <option value="rising">{getTriggerModeLabel("rising")}</option>
-                    <option value="falling">{getTriggerModeLabel("falling")}</option>
+                    <option value="pulse">{getTriggerModeLabel("pulse")}</option>
                     <option value="waveform">{getTriggerModeLabel("waveform")}</option>
+                    <option value="sync-division">{getTriggerModeLabel("sync-division")}</option>
                   </Select>
                 </div>
 
                 {triggerMode === "waveform" ? (
                   <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-1">
+                    <label className="flex items-center gap-2 rounded-lg border border-border/70 bg-white/70 px-3 py-2 text-sm font-medium text-foreground md:col-span-2 xl:col-span-1">
+                      <input
+                        className="h-4 w-4 accent-cyan-600"
+                        type="checkbox"
+                        checked={requireCompletePeriods}
+                        onChange={(event) =>
+                          updateBlock(block.id, {
+                            requireCompletePeriods: event.target.checked,
+                          })
+                        }
+                      />
+                      Require complete periods
+                    </label>
+
                     <div className="space-y-2">
                       <Label htmlFor="inspector-trigger-frequency">Frequency (Hz)</Label>
                       <DraftNumberInput
@@ -246,6 +301,92 @@ export function InspectorPanel() {
                           updateBlock(block.id, {
                             dutyCycle: getDutyCycleFromHighTimeMs(
                               triggerFrequencyHz,
+                              value * 1_000,
+                            ),
+                          })
+                        }
+                      />
+                    </div>
+                  </div>
+                ) : triggerMode === "sync-division" ? (
+                  <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-1">
+                    <div className="space-y-2 md:col-span-2 xl:col-span-1">
+                      <Label>Source PWM Block</Label>
+                      <Button
+                        className="w-full justify-start"
+                        size="sm"
+                        variant={
+                          syncSourcePickTargetBlockId === block.id ? "default" : "outline"
+                        }
+                        onClick={() => setSyncSourcePickTargetBlock(block.id)}
+                      >
+                        {syncSourceBlock
+                          ? `Source: ${syncSourceLabel ?? "selected PWM"}`
+                          : "Pick source PWM block"}
+                      </Button>
+                      {!syncSourceBlock ? (
+                        <div className="text-xs text-amber-700">
+                          Choose a source PWM block.
+                        </div>
+                      ) : derivedPeriodMs !== null ? (
+                        <div className="text-xs text-muted-foreground">
+                          Derived period: {(derivedPeriodMs! / 1_000).toLocaleString(undefined, {
+                            maximumFractionDigits: 9,
+                          })}{" "}
+                          s
+                        </div>
+                      ) : null}
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="inspector-sync-multiplier">Period Multiplier</Label>
+                      <DraftNumberInput
+                        id="inspector-sync-multiplier"
+                        min={1}
+                        minValue={1}
+                        step="1"
+                        type="number"
+                        value={periodMultiplier}
+                        onCommit={(value) =>
+                          updateBlock(block.id, {
+                            periodMultiplier: normalizePeriodMultiplier(value),
+                          })
+                        }
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="inspector-sync-duty">Duty Cycle (%)</Label>
+                      <DraftNumberInput
+                        id="inspector-sync-duty"
+                        min="0"
+                        minValue={0}
+                        max="100"
+                        maxValue={100}
+                        step="1"
+                        type="number"
+                        value={triggerDutyCycle}
+                        onCommit={(value) =>
+                          updateBlock(block.id, {
+                            dutyCycle: normalizeDutyCycle(value),
+                          })
+                        }
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="inspector-sync-high-time">On Time (s)</Label>
+                      <DraftNumberInput
+                        id="inspector-sync-high-time"
+                        min="0"
+                        minValue={0}
+                        step="any"
+                        type="number"
+                        value={triggerHighTimeMs / 1_000}
+                        onCommit={(value) =>
+                          updateBlock(block.id, {
+                            dutyCycle: getDutyCycleFromHighTimeMs(
+                              derivedFrequencyHz ?? triggerFrequencyHz,
                               value * 1_000,
                             ),
                           })

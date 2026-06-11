@@ -11,7 +11,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import nectowLabLogo from "@/assets/nectow-lab-logo.svg";
 import { OverviewMinimap } from "@/components/overview-minimap";
 import { Badge } from "@/components/ui/badge";
@@ -33,6 +33,10 @@ import {
   getFirmwareScheduleSummary,
 } from "@/lib/firmware-constraints";
 import {
+  DEFAULT_SCHEDULE_FILE,
+  DEFAULT_SCHEDULE_FILE_NAME,
+} from "@/lib/default-schedule";
+import {
   applyPumpCalibrationToBlocksByRowId,
   createPumpCalibrationSetFile,
 } from "@/lib/pump-calibration";
@@ -44,6 +48,7 @@ import {
   saveProjectJsonFile,
 } from "@/lib/project-files";
 import {
+  getBoardStatus,
   startBoardSchedule,
   stopBoardSchedule,
   uploadBoardSchedule,
@@ -114,6 +119,23 @@ interface TopToolbarProps {
   onJumpToTime: (timeMs: number, behavior?: ScrollBehavior) => void;
 }
 
+const SCHED_RUNNING = 2;
+const SCHED_IDLE = 0;
+const SCHED_STOPPED = 3;
+const SCHED_ERROR = 4;
+const START_STATUS_POLL_INTERVAL_MS = 100;
+const START_PRELOAD_PROGRESS_MS = 1_000;
+const START_STATUS_TIMEOUT_MS = 5_000;
+const RUN_STATUS_POLL_INTERVAL_MS = 250;
+const UPLOAD_CONTROL_SAFETY_LOCKOUT_MS = 500;
+const CONTROL_MESSAGE_STACK_LIMIT = 3;
+
+function delay(ms: number) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
 export function TopToolbar({
   totalDurationMs,
   viewportDurationMs,
@@ -162,13 +184,18 @@ export function TopToolbar({
   const totalDurationSeconds = totalDurationMs / 1_000;
   const gridSizeSeconds = gridSizeMs / 1_000;
   const [newChannelType, setNewChannelType] = useState<DeviceType>("peristaltic");
-  const [scheduleFileName, setScheduleFileName] = useState(() =>
-    getDefaultJsonFileName("schedule"),
-  );
+  const [scheduleFileName, setScheduleFileName] = useState(DEFAULT_SCHEDULE_FILE_NAME);
   const [scheduleFiles, setScheduleFiles] = useState<string[]>([]);
   const [selectedScheduleFile, setSelectedScheduleFile] = useState("");
   const [scheduleFilePendingDelete, setScheduleFilePendingDelete] = useState("");
   const [scheduleFileMessage, setScheduleFileMessage] = useState("");
+  const [startDelayStartedAt, setStartDelayStartedAt] = useState<number | null>(null);
+  const [startDelayProgress, setStartDelayProgress] = useState(0);
+  const [showStartDelayProgress, setShowStartDelayProgress] = useState(false);
+  const [isUploadSafetyLockoutActive, setIsUploadSafetyLockoutActive] = useState(false);
+  const [controlMessageStack, setControlMessageStack] = useState<string[]>([]);
+  const uploadSafetyTimeoutRef = useRef<number | null>(null);
+  const hasLoadedDefaultScheduleRef = useRef(false);
   const firmwareSummary = getFirmwareScheduleSummary(blocks, rows);
   const selectedChannelCount = rows.filter((row) => row.deviceType === newChannelType).length;
   const selectedChannelLimit =
@@ -179,23 +206,265 @@ export function TopToolbar({
   const isBoardBusy = scheduleCommandState !== null || isCalibrationRunning;
   const canUploadSchedule =
     firmwareSummary.isWithinLimits && firmwareSummary.eventCount > 0 && !isBoardBusy;
+  const canStartSchedule =
+    !isBoardBusy && !isUploadSafetyLockoutActive && experimentState !== "running";
+  const canStopSchedule = !isBoardBusy && !isUploadSafetyLockoutActive;
+  const uploadSafetyMessage = isUploadSafetyLockoutActive
+    ? `Start/stop locked for ${UPLOAD_CONTROL_SAFETY_LOCKOUT_MS / 1_000}s after upload.`
+    : null;
+  const controlMessages = (
+    uploadSafetyMessage
+      ? [...controlMessageStack, uploadSafetyMessage]
+      : controlMessageStack
+  ).slice(-CONTROL_MESSAGE_STACK_LIMIT);
+
+  useEffect(() => {
+    if (startDelayStartedAt === null) {
+      return;
+    }
+
+    const updateProgress = () => {
+      const elapsedMs = Date.now() - startDelayStartedAt;
+      setStartDelayProgress(Math.min(100, (elapsedMs / START_PRELOAD_PROGRESS_MS) * 100));
+    };
+
+    updateProgress();
+    const intervalId = window.setInterval(updateProgress, 50);
+
+    return () => window.clearInterval(intervalId);
+  }, [startDelayStartedAt]);
+
+  useEffect(() => {
+    const nextMessage = scheduleMessage.trim();
+
+    if (!nextMessage) {
+      return;
+    }
+
+    setControlMessageStack((currentMessages) => {
+      if (currentMessages.at(-1) === nextMessage) {
+        return currentMessages;
+      }
+
+      return [...currentMessages, nextMessage].slice(-CONTROL_MESSAGE_STACK_LIMIT);
+    });
+  }, [scheduleMessage]);
+
+  useEffect(
+    () => () => {
+      if (uploadSafetyTimeoutRef.current !== null) {
+        window.clearTimeout(uploadSafetyTimeoutRef.current);
+      }
+    },
+    [],
+  );
+
+  const clearUploadSafetyLockout = () => {
+    if (uploadSafetyTimeoutRef.current !== null) {
+      window.clearTimeout(uploadSafetyTimeoutRef.current);
+      uploadSafetyTimeoutRef.current = null;
+    }
+
+    setIsUploadSafetyLockoutActive(false);
+  };
+
+  const beginUploadSafetyLockout = () => {
+    clearUploadSafetyLockout();
+    setIsUploadSafetyLockoutActive(true);
+    uploadSafetyTimeoutRef.current = window.setTimeout(() => {
+      uploadSafetyTimeoutRef.current = null;
+      setIsUploadSafetyLockoutActive(false);
+    }, UPLOAD_CONTROL_SAFETY_LOCKOUT_MS);
+  };
+
+  const resetStartDelayProgress = () => {
+    setStartDelayStartedAt(null);
+    setStartDelayProgress(0);
+    setShowStartDelayProgress(false);
+  };
+
+  const beginStartDelayProgress = () => {
+    setStartDelayProgress(0);
+    setShowStartDelayProgress(true);
+    setStartDelayStartedAt(Date.now());
+  };
+
+  const loadScheduleFileByName = async (
+    fileName: string,
+    options: { showMessage?: boolean } = {},
+  ) => {
+    const showMessage = options.showMessage ?? true;
+
+    if (!fileName) {
+      if (showMessage) {
+        setScheduleFileMessage("Select a schedule file first.");
+      }
+      return;
+    }
+
+    try {
+      const rawScheduleFile = await loadProjectJsonFile<unknown>("schedules", fileName);
+      const scheduleFile = normalizeScheduleFile(rawScheduleFile);
+
+      loadSchedule({
+        rows: scheduleFile.rows,
+        blocks: scheduleFile.blocks,
+        gridSizeMs: scheduleFile.gridSizeMs,
+        zoomPxPerMinute: scheduleFile.zoomPxPerMinute,
+        experimentDurationMs: scheduleFile.experimentDurationMs,
+      });
+      setScheduleFileName(fileName);
+      setSelectedScheduleFile(fileName);
+      setScheduleFilePendingDelete("");
+
+      if (scheduleFile.lastCalibrationFileName) {
+        try {
+          const calibrationFile = await loadProjectJsonFile<unknown>(
+            "calibrations",
+            scheduleFile.lastCalibrationFileName,
+          );
+          importCalibrationSet(calibrationFile, scheduleFile.lastCalibrationFileName, scheduleFile.rows);
+          if (showMessage) {
+            setScheduleFileMessage(
+              `Loaded ${fileName} with ${scheduleFile.lastCalibrationFileName}.`,
+            );
+          }
+        } catch (error) {
+          if (showMessage) {
+            setScheduleFileMessage(
+              `Loaded ${fileName}; calibration failed: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
+        }
+      } else if (showMessage) {
+        setScheduleFileMessage(`Loaded ${fileName}.`);
+      }
+    } catch (error) {
+      if (showMessage) {
+        setScheduleFileMessage(`Failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  };
 
   const refreshScheduleFiles = async () => {
     try {
-      const files = await listProjectJsonFiles("schedules");
+      let files = await listProjectJsonFiles("schedules");
+
+      if (!files.includes(DEFAULT_SCHEDULE_FILE_NAME)) {
+        const savedDefaultFileName = await saveProjectJsonFile({
+          folder: "schedules",
+          fileName: DEFAULT_SCHEDULE_FILE_NAME,
+          content: DEFAULT_SCHEDULE_FILE,
+        });
+        files = [...files, savedDefaultFileName].sort();
+      }
+
       setScheduleFiles(files);
-      setSelectedScheduleFile((current) => current || files[0] || "");
+      setSelectedScheduleFile((current) =>
+        files.includes(current) ? current : DEFAULT_SCHEDULE_FILE_NAME,
+      );
     } catch (error) {
       setScheduleFileMessage(error instanceof Error ? error.message : String(error));
     }
   };
 
   useEffect(() => {
-    void refreshScheduleFiles();
+    if (hasLoadedDefaultScheduleRef.current) {
+      return;
+    }
+
+    hasLoadedDefaultScheduleRef.current = true;
+
+    void (async () => {
+      await refreshScheduleFiles();
+      await loadScheduleFileByName(DEFAULT_SCHEDULE_FILE_NAME, { showMessage: false });
+    })();
   }, []);
+
+  const waitForBoardStart = async (portName: string) => {
+    const deadline = Date.now() + START_STATUS_TIMEOUT_MS;
+
+    while (Date.now() <= deadline) {
+      const statusResult = await getBoardStatus(portName);
+      appendSerialLog(statusResult.log, `# Start status ${portName || "COM port"}`);
+
+      if (!statusResult.ok) {
+        throw new Error(statusResult.message);
+      }
+
+      const status = statusResult.status;
+
+      if (status?.stateCode === SCHED_RUNNING) {
+        return "running" as const;
+      }
+
+      if (status?.stateCode === SCHED_ERROR) {
+        throw new Error(
+          `Schedule failed while preparing to start. Last error: 0x${status.lastError
+            .toString(16)
+            .toUpperCase()
+            .padStart(2, "0")}.`,
+        );
+      }
+
+      setScheduleMessage(`Preparing board start; current status is ${status?.state ?? "unknown"}.`);
+      await delay(START_STATUS_POLL_INTERVAL_MS);
+    }
+
+    throw new Error("Schedule start was acknowledged, but the board did not report running.");
+  };
+
+  const monitorBoardRun = async (portName: string) => {
+    while (true) {
+      await delay(RUN_STATUS_POLL_INTERVAL_MS);
+
+      const statusResult = await getBoardStatus(portName);
+
+      if (!statusResult.ok) {
+        appendSerialLog(statusResult.log, `# Run status ${portName || "COM port"}`);
+        setScheduleMessage(`Failed: ${statusResult.message}`);
+        resetExperiment();
+        resetStartDelayProgress();
+        return;
+      }
+
+      const status = statusResult.status;
+
+      if (status?.stateCode === SCHED_ERROR) {
+        appendSerialLog(statusResult.log, `# Run status ${portName || "COM port"}`);
+        setScheduleMessage(
+          `Schedule error. Last error: 0x${status.lastError
+            .toString(16)
+            .toUpperCase()
+            .padStart(2, "0")}.`,
+        );
+        resetExperiment();
+        resetStartDelayProgress();
+        return;
+      }
+
+      if (status?.stateCode === SCHED_STOPPED || status?.stateCode === SCHED_IDLE) {
+        appendSerialLog(statusResult.log, `# Run status ${portName || "COM port"}`);
+        setScheduleMessage("Schedule stopped.");
+        resetExperiment();
+        resetStartDelayProgress();
+        return;
+      }
+    }
+  };
 
   const runScheduleCommand = async (command: ScheduleCommand) => {
     if (isCalibrationRunning) {
+      return;
+    }
+
+    if (command === "start" && experimentState === "running") {
+      return;
+    }
+
+    if ((command === "start" || command === "stop") && isUploadSafetyLockoutActive) {
       return;
     }
 
@@ -205,6 +474,14 @@ export function TopToolbar({
 
     setScheduleCommandState(command);
     setScheduleMessage(`${commandLabel} in progress on ${trimmedComPort || "COM port"}...`);
+
+    if (command === "start" || command === "upload" || command === "stop") {
+      resetStartDelayProgress();
+    }
+
+    if (command === "upload" || command === "stop") {
+      clearUploadSafetyLockout();
+    }
 
     try {
       const result =
@@ -227,19 +504,30 @@ export function TopToolbar({
 
       if (result.ok && command === "upload") {
         resetExperiment();
+        beginUploadSafetyLockout();
       }
 
       if (result.ok && command === "start") {
-        startExperiment();
+        beginStartDelayProgress();
+        await waitForBoardStart(trimmedComPort);
+        setStartDelayStartedAt(null);
+        setStartDelayProgress(100);
+        startExperiment(0);
+        setScheduleMessage("Board is running.");
+        void monitorBoardRun(trimmedComPort);
       }
 
       if (result.ok && command === "stop") {
         resetExperiment();
+        resetStartDelayProgress();
       }
     } catch (error) {
       setScheduleMessage(
         `Failed: ${error instanceof Error ? error.message : String(error)}`,
       );
+      if (command === "start") {
+        resetStartDelayProgress();
+      }
     } finally {
       setScheduleCommandState(null);
     }
@@ -292,51 +580,7 @@ export function TopToolbar({
   };
 
   const loadScheduleFile = async () => {
-    if (!selectedScheduleFile) {
-      setScheduleFileMessage("Select a schedule file first.");
-      return;
-    }
-
-    try {
-      const rawScheduleFile = await loadProjectJsonFile<unknown>(
-        "schedules",
-        selectedScheduleFile,
-      );
-      const scheduleFile = normalizeScheduleFile(rawScheduleFile);
-
-      loadSchedule({
-        rows: scheduleFile.rows,
-        blocks: scheduleFile.blocks,
-        gridSizeMs: scheduleFile.gridSizeMs,
-        zoomPxPerMinute: scheduleFile.zoomPxPerMinute,
-        experimentDurationMs: scheduleFile.experimentDurationMs,
-      });
-      setScheduleFileName(selectedScheduleFile);
-      setScheduleFilePendingDelete("");
-
-      if (scheduleFile.lastCalibrationFileName) {
-        try {
-          const calibrationFile = await loadProjectJsonFile<unknown>(
-            "calibrations",
-            scheduleFile.lastCalibrationFileName,
-          );
-          importCalibrationSet(calibrationFile, scheduleFile.lastCalibrationFileName, scheduleFile.rows);
-          setScheduleFileMessage(
-            `Loaded ${selectedScheduleFile} with ${scheduleFile.lastCalibrationFileName}.`,
-          );
-        } catch (error) {
-          setScheduleFileMessage(
-            `Loaded ${selectedScheduleFile}; calibration failed: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          );
-        }
-      } else {
-        setScheduleFileMessage(`Loaded ${selectedScheduleFile}.`);
-      }
-    } catch (error) {
-      setScheduleFileMessage(`Failed: ${error instanceof Error ? error.message : String(error)}`);
-    }
+    await loadScheduleFileByName(selectedScheduleFile);
   };
 
   const deleteScheduleFile = async (fileToDelete: string) => {
@@ -345,11 +589,19 @@ export function TopToolbar({
       return;
     }
 
+    if (fileToDelete === DEFAULT_SCHEDULE_FILE_NAME) {
+      setScheduleFilePendingDelete("");
+      setScheduleFileMessage(`${DEFAULT_SCHEDULE_FILE_NAME} is required and cannot be deleted.`);
+      return;
+    }
+
     try {
       const deletedFileName = await deleteProjectJsonFile("schedules", fileToDelete);
       const files = await listProjectJsonFiles("schedules");
       const nextSelectedFile =
-        files.find((fileName) => fileName !== deletedFileName) ?? files[0] ?? "";
+        files.find((fileName) => fileName !== deletedFileName) ??
+        (files.includes(DEFAULT_SCHEDULE_FILE_NAME) ? DEFAULT_SCHEDULE_FILE_NAME : files[0]) ??
+        "";
 
       setScheduleFiles(files);
       setSelectedScheduleFile(nextSelectedFile);
@@ -437,7 +689,7 @@ export function TopToolbar({
                 className="min-w-[88px] flex-1"
                 size="sm"
                 variant="secondary"
-                disabled={isBoardBusy}
+                disabled={!canStartSchedule}
                 onClick={() => runScheduleCommand("start")}
               >
                 <Play className="h-4 w-4" />
@@ -447,7 +699,7 @@ export function TopToolbar({
                 className="min-w-[88px] flex-1"
                 size="sm"
                 variant="outline"
-                disabled={isBoardBusy}
+                disabled={!canStopSchedule}
                 title="Stop the board schedule and reset the playhead"
                 onClick={() => runScheduleCommand("stop")}
               >
@@ -455,17 +707,42 @@ export function TopToolbar({
                 {scheduleCommandState === "stop" ? "Stopping" : "Stop"}
               </Button>
             </div>
-            {scheduleMessage ? (
-              <div
-                className={
-                  scheduleMessage.toLowerCase().includes("failed") ||
-                  scheduleMessage.toLowerCase().includes("error")
-                    ? "mt-2 truncate rounded-lg border border-rose-200 bg-rose-50 px-2 py-1 text-[11px] text-rose-700"
-                    : "mt-2 truncate rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] text-slate-600"
-                }
-                title={scheduleMessage}
-              >
-                {scheduleMessage}
+            {controlMessages.length > 0 ? (
+              <div className="mt-2 space-y-1">
+                {controlMessages.map((message, index) => {
+                  const isErrorMessage =
+                    message.toLowerCase().includes("failed") ||
+                    message.toLowerCase().includes("error");
+
+                  return (
+                    <div
+                      key={`${message}-${index}`}
+                      className={cn(
+                        "truncate rounded-lg border px-2 py-1 text-[11px]",
+                        isErrorMessage
+                          ? "border-rose-200 bg-rose-50 text-rose-700"
+                          : "border-slate-200 bg-slate-50 text-slate-600",
+                      )}
+                      title={message}
+                    >
+                      {message}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : null}
+            {showStartDelayProgress ? (
+              <div className="mt-2 rounded-lg border border-cyan-100 bg-cyan-50/70 px-2 py-1.5">
+                <div className="mb-1 flex items-center justify-between gap-2 text-[10px] font-medium text-cyan-800">
+                  <span>Start warmup</span>
+                  <span>{Math.round(startDelayProgress)}%</span>
+                </div>
+                <div className="h-1.5 overflow-hidden rounded-full bg-cyan-100">
+                  <div
+                    className="h-full rounded-full bg-cyan-500 transition-[width] duration-75 ease-linear"
+                    style={{ width: `${startDelayProgress}%` }}
+                  />
+                </div>
               </div>
             ) : null}
           </div>
@@ -585,9 +862,15 @@ export function TopToolbar({
                 </Select>
                 <Button
                   aria-label="Delete selected schedule"
-                  disabled={!selectedScheduleFile}
+                  disabled={
+                    !selectedScheduleFile || selectedScheduleFile === DEFAULT_SCHEDULE_FILE_NAME
+                  }
                   size="icon"
-                  title="Delete selected schedule"
+                  title={
+                    selectedScheduleFile === DEFAULT_SCHEDULE_FILE_NAME
+                      ? "Default schedule cannot be deleted"
+                      : "Delete selected schedule"
+                  }
                   variant="outline"
                   onClick={() => setScheduleFilePendingDelete(selectedScheduleFile)}
                 >

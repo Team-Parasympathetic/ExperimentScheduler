@@ -3,7 +3,7 @@ import { clamp } from "@/lib/utils";
 
 export const SECOND_MS = 1_000;
 export const MINUTE_MS = 60_000;
-export const MIN_BLOCK_DURATION_MS = 500;
+export const MIN_BLOCK_DURATION_MS = 1_000;
 export const EXPERIMENT_PADDING_MS = 15 * MINUTE_MS;
 export const DEFAULT_EXPERIMENT_DURATION_MS = 5 * MINUTE_MS;
 export const MIN_AUTO_SCHEDULE_DURATION_MS = DEFAULT_EXPERIMENT_DURATION_MS;
@@ -19,10 +19,12 @@ export const GRID_OPTIONS = [
   { label: "1 min", value: 60_000 },
 ];
 
-export const MIN_ZOOM_PX_PER_MINUTE = 1_200;
-export const MAX_ZOOM_PX_PER_MINUTE = 48_000;
+export const MIN_ZOOM_PX_PER_MINUTE = 600;
+export const MAX_ZOOM_PX_PER_MINUTE = 96_000;
 export const ZOOM_LEVELS = [
   MIN_ZOOM_PX_PER_MINUTE,
+  900,
+  1_200,
   1_800,
   3_000,
   6_000,
@@ -31,6 +33,8 @@ export const ZOOM_LEVELS = [
   18_000,
   24_000,
   36_000,
+  48_000,
+  72_000,
   MAX_ZOOM_PX_PER_MINUTE,
 ] as const;
 export const DEFAULT_ZOOM_PX_PER_MINUTE = 6_000;

@@ -4,16 +4,14 @@ import {
   ChevronRight,
   FlaskConical,
   ListTree,
-  SlidersHorizontal,
 } from "lucide-react";
 import { DeviceOverviewPanel } from "@/components/device-overview-panel";
-import { InspectorPanel } from "@/components/inspector-panel";
 import { PumpCalibrationPanel } from "@/components/pump-calibration-panel";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 
-type SidebarView = "inspector" | "devices" | "calibration";
+type SidebarView = "devices" | "calibration";
 
 interface SchedulerSidebarProps {
   collapsed: boolean;
@@ -24,14 +22,8 @@ const SIDEBAR_VIEWS: Array<{
   id: SidebarView;
   label: string;
   eyebrow: string;
-  Icon: typeof SlidersHorizontal;
+  Icon: typeof ListTree;
 }> = [
-  {
-    id: "inspector",
-    label: "Block Inspector",
-    eyebrow: "Inspector",
-    Icon: SlidersHorizontal,
-  },
   {
     id: "devices",
     label: "Device Overview",
@@ -101,9 +93,7 @@ export function SchedulerSidebar({
 
         {collapsed ? null : (
           <div className="h-full min-h-0 pb-1">
-            {activeView === "inspector" ? (
-              <InspectorPanel />
-            ) : activeView === "devices" ? (
+            {activeView === "devices" ? (
               <DeviceOverviewPanel />
             ) : activeView === "calibration" ? (
               <PumpCalibrationPanel />

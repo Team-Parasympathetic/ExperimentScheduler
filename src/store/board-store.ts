@@ -15,7 +15,7 @@ export interface DeviceSlotInfo {
 }
 
 export interface SerialLogEntry {
-  direction: "tx" | "rx";
+  direction: "tx" | "rx" | "info";
   label: string;
   seq: number;
   msgType: number;
@@ -87,6 +87,10 @@ function formatHex(value: number, width: number) {
 }
 
 export function formatSerialLogEntry(entry: SerialLogEntry) {
+  if (entry.direction === "info") {
+    return `INFO ${entry.label} ${entry.detail}`;
+  }
+
   const direction = entry.direction.toUpperCase();
   return `${direction} ${entry.label} seq=${entry.seq} type=${formatHex(entry.msgType, 2)} ${entry.detail} :: ${entry.bytes}`;
 }

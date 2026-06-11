@@ -12,16 +12,18 @@ type DragMode = "move" | "resize-start" | "resize-end";
 interface TimelineRowProps {
   row: Row;
   blocks: Block[];
-  gridSizeMs: number;
   zoomPxPerMinute: number;
   timelineWidth: number;
   totalDurationMs: number;
   selectedBlockIds: string[];
+  guideObscuredBlockIds: Set<string>;
+  syncSourcePickTargetBlockId: string | null;
   isStriped: boolean;
   onSelectBlock: (
     blockId: string,
     options?: { additive?: boolean; range?: boolean },
   ) => void;
+  onPickSyncSourceBlock: (blockId: string) => void;
   onSetPasteTarget: (rowId: string, timeMs: number) => void;
   onOpenContextMenu: (blockId: string, x: number, y: number) => void;
   onOpenInsertMenu: (rowId: string, timeMs: number, x: number, y: number) => void;
@@ -36,20 +38,21 @@ interface TimelineRowProps {
 export function TimelineRow({
   row,
   blocks,
-  gridSizeMs,
   isStriped,
   onBlockPointerDown,
   onCreateBlock,
   onOpenContextMenu,
   onOpenInsertMenu,
+  onPickSyncSourceBlock,
   onSelectBlock,
   onSetPasteTarget,
   selectedBlockIds,
+  guideObscuredBlockIds,
+  syncSourcePickTargetBlockId,
   timelineWidth,
   totalDurationMs,
   zoomPxPerMinute,
 }: TimelineRowProps) {
-  const gridPixelSize = msToPx(gridSizeMs, zoomPxPerMinute);
   const isScheduleStatus = Boolean(row.isScheduleStatus);
 
   return (
@@ -110,16 +113,13 @@ export function TimelineRow({
     >
       <div
         className={cn(
-          "timeline-grid absolute inset-0",
+          "absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.7),rgba(255,255,255,0))]",
           isScheduleStatus
             ? "bg-cyan-50/90"
             : isStriped
               ? "bg-scheduler-lane-alt/80"
               : "bg-scheduler-lane/80",
         )}
-        style={{
-          backgroundSize: `${gridPixelSize}px 100%, ${gridPixelSize}px 100%, 100% 100%`,
-        }}
       />
       {isScheduleStatus ? (
         <>
@@ -138,6 +138,17 @@ export function TimelineRow({
           key={block.id}
           block={block}
           row={row}
+          isDimmed={
+            Boolean(syncSourcePickTargetBlockId) &&
+            (block.id === syncSourcePickTargetBlockId ||
+              block.triggerMode !== "waveform")
+          }
+          isGuideObscured={guideObscuredBlockIds.has(block.id)}
+          isSyncSourceCandidate={
+            Boolean(syncSourcePickTargetBlockId) &&
+            block.id !== syncSourcePickTargetBlockId &&
+            block.triggerMode === "waveform"
+          }
           isSelected={selectedBlockIds.includes(block.id)}
           left={msToPx(block.startMs, zoomPxPerMinute)}
           shadeIndex={blockIndex}
@@ -156,10 +167,12 @@ export function TimelineRow({
             onBlockPointerDown(block.id, "resize-end", event)
           }
           onSelect={(event: ReactMouseEvent<HTMLDivElement>) =>
-            onSelectBlock(block.id, {
-              additive: event.metaKey || event.ctrlKey,
-              range: event.shiftKey,
-            })
+            syncSourcePickTargetBlockId
+              ? onPickSyncSourceBlock(block.id)
+              : onSelectBlock(block.id, {
+                  additive: event.metaKey || event.ctrlKey,
+                  range: event.shiftKey,
+                })
           }
         />
       ))}

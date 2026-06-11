@@ -2,7 +2,7 @@ export type DeviceType = "peristaltic" | "trigger";
 export type Direction = "forward" | "reverse";
 export type ExperimentState = "idle" | "running";
 export type PumpRateMode = "variable" | "fixed";
-export type TriggerMode = "rising" | "falling" | "waveform";
+export type TriggerMode = "pulse" | "waveform" | "sync-division";
 
 export interface Row {
   id: string;
@@ -24,4 +24,7 @@ export interface Block {
   triggerMode?: TriggerMode;
   frequencyHz?: number;
   dutyCycle?: number;
+  requireCompletePeriods?: boolean;
+  syncSourceBlockId?: string | null;
+  periodMultiplier?: number;
 }

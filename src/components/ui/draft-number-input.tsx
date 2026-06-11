@@ -56,7 +56,6 @@ export function DraftNumberInput({
     }
 
     onCommit(parsedValue);
-    setDraft(formatValue(parsedValue));
   };
 
   return (
@@ -148,7 +147,6 @@ export function NullableDraftNumberInput({
     }
 
     onCommit(parsedValue);
-    setDraft(formatValue(parsedValue));
   };
 
   return (

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { flushSync } from "react-dom";
 import { RowSidebar } from "@/components/row-sidebar";
 import { TimelineRow } from "@/components/timeline-row";
@@ -22,6 +22,7 @@ import {
   snapMs,
 } from "@/lib/time";
 import { getBlockById, getRowsById, getSortedRowBlocks } from "@/lib/schedule";
+import { BLOCK_CREATION_GUIDE_EVENT } from "@/lib/smart-guides";
 import { clamp } from "@/lib/utils";
 import { useSchedulerStore } from "@/store/scheduler-store";
 import type { Block, Row } from "@/types/scheduler";
@@ -48,10 +49,44 @@ interface PanState {
 
 interface DistanceGuide {
   distanceMs: number;
-  draggedRowIndex: number;
+  sourceRowIndex: number;
   targetRowIndex: number;
   startMs: number;
   endMs: number;
+}
+
+interface ActiveGuideEdge {
+  timeMs: number;
+  rowIndex: number;
+}
+
+interface CandidateGuideEdge {
+  timeMs: number;
+  rowIndex: number;
+  priority: number;
+}
+
+const CREATION_GUIDE_DURATION_MS = 1_200;
+const BLOCK_TOP_OFFSET_PX = 6;
+const BLOCK_HEIGHT_PX = 52;
+const GUIDE_LABEL_HALF_WIDTH_PX = 52;
+const GUIDE_LABEL_TOP_OFFSET_PX = 38;
+const GUIDE_LABEL_BOTTOM_OFFSET_PX = 4;
+
+function pointInRect(
+  containerLeft: number,
+  containerRight: number,
+  containerTop: number,
+  containerBottom: number,
+  pointX: number,
+  pointY: number,
+) {
+  return (
+    pointX >= containerLeft &&
+    pointX <= containerRight &&
+    pointY >= containerTop &&
+    pointY <= containerBottom
+  );
 }
 
 interface TimelineGridProps {
@@ -75,12 +110,18 @@ export function TimelineGrid({
   const zoomPxPerMinute = useSchedulerStore((state) => state.zoomPxPerMinute);
   const playheadMs = useSchedulerStore((state) => state.playheadMs);
   const selectedBlockIds = useSchedulerStore((state) => state.selectedBlockIds);
+  const syncSourcePickTargetBlockId = useSchedulerStore(
+    (state) => state.syncSourcePickTargetBlockId,
+  );
   const addBlock = useSchedulerStore((state) => state.addBlock);
   const updateBlock = useSchedulerStore((state) => state.updateBlock);
   const moveBlocks = useSchedulerStore((state) => state.moveBlocks);
   const beginHistoryEntry = useSchedulerStore((state) => state.beginHistoryEntry);
   const commitHistoryEntry = useSchedulerStore((state) => state.commitHistoryEntry);
   const setSelectedBlock = useSchedulerStore((state) => state.setSelectedBlock);
+  const setSyncSourcePickTargetBlock = useSchedulerStore(
+    (state) => state.setSyncSourcePickTargetBlock,
+  );
   const setPasteTarget = useSchedulerStore((state) => state.setPasteTarget);
   const setZoomPxPerMinute = useSchedulerStore((state) => state.setZoomPxPerMinute);
   const [dragState, setDragState] = useState<DragState | null>(null);
@@ -92,41 +133,138 @@ export function TimelineGrid({
     timeAtPointerMs: number;
     trackViewportX: number;
   } | null>(null);
+  const creationGuideTimeoutRef = useRef<number | null>(null);
+  const [creationGuideBlockIds, setCreationGuideBlockIds] = useState<string[]>([]);
 
   const timelineWidth = Math.max(msToPx(totalDurationMs, zoomPxPerMinute), 1200);
   const renderedGridSizeMs = getVisibleGridSizeMs(gridSizeMs, zoomPxPerMinute);
   const labelEvery = getLabelEvery(renderedGridSizeMs, zoomPxPerMinute);
   const tickCount = Math.ceil(totalDurationMs / renderedGridSizeMs) + 1;
+  const gridTicks = useMemo(
+    () =>
+      Array.from({ length: tickCount }, (_, index) => ({
+        timeMs: index * renderedGridSizeMs,
+        left: msToPx(index * renderedGridSizeMs, zoomPxPerMinute),
+        isMajor: index % labelEvery === 0,
+      })),
+    [labelEvery, renderedGridSizeMs, tickCount, zoomPxPerMinute],
+  );
   const secondsPerDivisionLabel = formatSecondsPerDivision(renderedGridSizeMs);
+  const rowsById = useMemo(
+    () => getRowsById(rows),
+    [rows],
+  );
+  const showCreationGuideForBlockIds = useCallback((blockIds: string[]) => {
+    if (blockIds.length === 0) {
+      return;
+    }
+
+    setCreationGuideBlockIds(blockIds);
+
+    if (creationGuideTimeoutRef.current !== null) {
+      window.clearTimeout(creationGuideTimeoutRef.current);
+    }
+
+    creationGuideTimeoutRef.current = window.setTimeout(() => {
+      creationGuideTimeoutRef.current = null;
+      setCreationGuideBlockIds([]);
+    }, CREATION_GUIDE_DURATION_MS);
+  }, []);
+  const addBlockWithCreationGuide = useCallback(
+    (rowId: string, startMs: number) => {
+      const previousBlockIds = new Set(
+        useSchedulerStore.getState().blocks.map((block) => block.id),
+      );
+
+      addBlock(rowId, startMs);
+
+      const newBlockIds = useSchedulerStore
+        .getState()
+        .blocks.filter((block) => !previousBlockIds.has(block.id))
+        .map((block) => block.id);
+
+      showCreationGuideForBlockIds(newBlockIds);
+    },
+    [addBlock, showCreationGuideForBlockIds],
+  );
   const distanceGuide = useMemo<DistanceGuide | null>(() => {
-    if (!dragState || dragState.mode !== "move") {
+    if (blocks.length < 2) {
       return null;
     }
 
     const movingBlockIds = new Set(
-      (dragState.originBlocks.length > 0
-        ? dragState.originBlocks
-        : [dragState.originBlock]
-      ).map((block) => block.id),
+      dragState
+        ? (dragState.originBlocks.length > 0
+            ? dragState.originBlocks
+            : [dragState.originBlock]
+          ).map((block) => block.id)
+        : [],
     );
-    const movingBlocks = blocks.filter((block) => movingBlockIds.has(block.id));
+    const creationBlockIdSet = new Set(creationGuideBlockIds);
+    const excludedBlockIds = dragState ? movingBlockIds : creationBlockIdSet;
+    const activeEdges: ActiveGuideEdge[] = [];
 
-    if (movingBlocks.length === 0) {
+    if (dragState) {
+      const activeBlocks = blocks.filter((block) => movingBlockIds.has(block.id));
+
+      if (activeBlocks.length === 0) {
+        return null;
+      }
+
+      if (dragState.mode === "move") {
+        const groupStartMs = Math.min(...activeBlocks.map((block) => block.startMs));
+        const groupEndMs = Math.max(...activeBlocks.map((block) => getBlockEnd(block)));
+        const sourceRowIndex = rows.findIndex((row) => row.id === activeBlocks[0]?.rowId);
+
+        if (sourceRowIndex < 0) {
+          return null;
+        }
+
+        activeEdges.push(
+          { timeMs: groupStartMs, rowIndex: sourceRowIndex },
+          { timeMs: groupEndMs, rowIndex: sourceRowIndex },
+        );
+      } else {
+        const activeBlock = activeBlocks.find((block) => block.id === dragState.blockId);
+        const sourceRowIndex = rows.findIndex((row) => row.id === activeBlock?.rowId);
+
+        if (!activeBlock || sourceRowIndex < 0) {
+          return null;
+        }
+
+        activeEdges.push({
+          timeMs:
+            dragState.mode === "resize-start"
+              ? activeBlock.startMs
+              : getBlockEnd(activeBlock),
+          rowIndex: sourceRowIndex,
+        });
+      }
+    } else if (creationGuideBlockIds.length > 0) {
+      const createdBlocks = blocks.filter((block) => creationBlockIdSet.has(block.id));
+
+      if (createdBlocks.length > 0) {
+        const groupStartMs = Math.min(...createdBlocks.map((block) => block.startMs));
+        const groupEndMs = Math.max(...createdBlocks.map((block) => getBlockEnd(block)));
+        const sourceRowIndex = rows.findIndex((row) => row.id === createdBlocks[0]?.rowId);
+
+        if (sourceRowIndex >= 0) {
+          activeEdges.push(
+            { timeMs: groupStartMs, rowIndex: sourceRowIndex },
+            { timeMs: groupEndMs, rowIndex: sourceRowIndex },
+          );
+        }
+      }
+    }
+
+    if (activeEdges.length === 0) {
       return null;
     }
 
-    const groupStartMs = Math.min(...movingBlocks.map((block) => block.startMs));
-    const groupEndMs = Math.max(...movingBlocks.map((block) => getBlockEnd(block)));
-    const draggedRowIndex = rows.findIndex((row) => row.id === movingBlocks[0]?.rowId);
-
-    if (draggedRowIndex < 0) {
-      return null;
-    }
-
-    let closestGuide: DistanceGuide | null = null;
+    const candidateEdges: CandidateGuideEdge[] = [];
 
     for (const candidateBlock of blocks) {
-      if (movingBlockIds.has(candidateBlock.id)) {
+      if (excludedBlockIds.has(candidateBlock.id)) {
         continue;
       }
 
@@ -135,45 +273,109 @@ export function TimelineGrid({
         continue;
       }
 
-      const candidateStartMs = candidateBlock.startMs;
-      const candidateEndMs = getBlockEnd(candidateBlock);
-      const edgePairs = [
-        [candidateStartMs, groupStartMs],
-        [candidateEndMs, groupStartMs],
-        [candidateStartMs, groupEndMs],
-        [candidateEndMs, groupEndMs],
-      ] as const;
+      candidateEdges.push(
+        { timeMs: candidateBlock.startMs, rowIndex: candidateRowIndex, priority: 0 },
+        { timeMs: getBlockEnd(candidateBlock), rowIndex: candidateRowIndex, priority: 0 },
+      );
+    }
 
-      for (const [candidateEdgeMs, draggedEdgeMs] of edgePairs) {
-        const distanceMs = Math.abs(draggedEdgeMs - candidateEdgeMs);
-        const rowDistance = Math.abs(candidateRowIndex - draggedRowIndex);
+    if (candidateEdges.length === 0) {
+      const sourceRowIndex = activeEdges[0].rowIndex;
+      candidateEdges.push(
+        ...gridTicks.map((tick) => ({
+          timeMs: tick.timeMs,
+          rowIndex: sourceRowIndex,
+          priority: 1,
+        })),
+      );
+    }
+
+    let closestGuide: DistanceGuide | null = null;
+    let closestPriority = Number.POSITIVE_INFINITY;
+
+    for (const activeEdge of activeEdges) {
+      for (const candidateEdge of candidateEdges) {
+        const distanceMs = Math.abs(activeEdge.timeMs - candidateEdge.timeMs);
+        const rowDistance = Math.abs(candidateEdge.rowIndex - activeEdge.rowIndex);
         const closestRowDistance = closestGuide
-          ? Math.abs(closestGuide.targetRowIndex - draggedRowIndex)
+          ? Math.abs(closestGuide.targetRowIndex - closestGuide.sourceRowIndex)
           : Number.POSITIVE_INFINITY;
+        const effectivePriority =
+          candidateEdge.priority + (candidateEdge.rowIndex === activeEdge.rowIndex ? 0 : 10);
 
         if (
           !closestGuide ||
           distanceMs < closestGuide.distanceMs ||
-          (distanceMs === closestGuide.distanceMs && rowDistance < closestRowDistance)
+          (distanceMs === closestGuide.distanceMs && rowDistance < closestRowDistance) ||
+          (distanceMs === closestGuide.distanceMs &&
+            rowDistance === closestRowDistance &&
+            effectivePriority < closestPriority)
         ) {
           closestGuide = {
             distanceMs,
-            draggedRowIndex,
-            targetRowIndex: candidateRowIndex,
-            startMs: Math.min(candidateEdgeMs, draggedEdgeMs),
-            endMs: Math.max(candidateEdgeMs, draggedEdgeMs),
+            sourceRowIndex: activeEdge.rowIndex,
+            targetRowIndex: candidateEdge.rowIndex,
+            startMs: Math.min(candidateEdge.timeMs, activeEdge.timeMs),
+            endMs: Math.max(candidateEdge.timeMs, activeEdge.timeMs),
           };
+          closestPriority = effectivePriority;
         }
       }
     }
 
     return closestGuide;
-  }, [blocks, dragState, rows]);
+  }, [blocks, creationGuideBlockIds, dragState, gridTicks, rows]);
+  const guideObscuredBlockIds = useMemo(() => {
+    if (!distanceGuide || distanceGuide.distanceMs === 0) {
+      return new Set<string>();
+    }
 
-  const rowsById = useMemo(
-    () => getRowsById(rows),
-    [rows],
-  );
+    const guideStartPx = msToPx(distanceGuide.startMs, zoomPxPerMinute);
+    const guideEndPx = msToPx(distanceGuide.endMs, zoomPxPerMinute);
+    const guideLeftPx = Math.min(guideStartPx, guideEndPx);
+    const guideWidthPx = Math.abs(guideEndPx - guideStartPx);
+    const sourceCenterY =
+      distanceGuide.sourceRowIndex * TIMELINE_ROW_HEIGHT + TIMELINE_ROW_HEIGHT / 2;
+    const targetCenterY =
+      distanceGuide.targetRowIndex * TIMELINE_ROW_HEIGHT + TIMELINE_ROW_HEIGHT / 2;
+    const labelLeftPx = clamp(
+      guideLeftPx + guideWidthPx / 2,
+      36,
+      Math.max(36, timelineWidth - 36),
+    );
+    const labelCenterX = labelLeftPx;
+    const labelCenterY =
+      sourceCenterY - (GUIDE_LABEL_TOP_OFFSET_PX + GUIDE_LABEL_BOTTOM_OFFSET_PX) / 2;
+    const obscuredBlockIds = new Set<string>();
+
+    for (const block of blocks) {
+      const rowIndex = rows.findIndex((row) => row.id === block.rowId);
+
+      if (rowIndex < 0) {
+        continue;
+      }
+
+      const blockLeftPx = msToPx(block.startMs, zoomPxPerMinute);
+      const blockRightPx = msToPx(getBlockEnd(block), zoomPxPerMinute);
+      const blockTopPx = rowIndex * TIMELINE_ROW_HEIGHT + BLOCK_TOP_OFFSET_PX;
+      const blockBottomPx = blockTopPx + BLOCK_HEIGHT_PX;
+
+      if (
+        pointInRect(
+          blockLeftPx,
+          blockRightPx,
+          blockTopPx,
+          blockBottomPx,
+          labelCenterX,
+          labelCenterY,
+        )
+      ) {
+        obscuredBlockIds.add(block.id);
+      }
+    }
+
+    return obscuredBlockIds;
+  }, [blocks, distanceGuide, rows, timelineWidth, zoomPxPerMinute]);
 
   useEffect(() => {
     zoomPxPerMinuteRef.current = zoomPxPerMinute;
@@ -184,9 +386,26 @@ export function TimelineGrid({
       if (zoomFrameRef.current !== null) {
         window.cancelAnimationFrame(zoomFrameRef.current);
       }
+
+      if (creationGuideTimeoutRef.current !== null) {
+        window.clearTimeout(creationGuideTimeoutRef.current);
+      }
     },
     [],
   );
+
+  useEffect(() => {
+    const handleBlockCreationGuide = (event: Event) => {
+      const blockIds = (event as CustomEvent<{ blockIds?: string[] }>).detail?.blockIds ?? [];
+      showCreationGuideForBlockIds(blockIds);
+    };
+
+    window.addEventListener(BLOCK_CREATION_GUIDE_EVENT, handleBlockCreationGuide);
+
+    return () => {
+      window.removeEventListener(BLOCK_CREATION_GUIDE_EVENT, handleBlockCreationGuide);
+    };
+  }, [showCreationGuideForBlockIds]);
 
   useEffect(() => {
     const container = scrollRef.current;
@@ -504,7 +723,7 @@ export function TimelineGrid({
                 const guideLeftPx = Math.min(guideStartPx, guideEndPx);
                 const guideWidthPx = Math.abs(guideEndPx - guideStartPx);
                 const draggedCenterY =
-                  distanceGuide.draggedRowIndex * TIMELINE_ROW_HEIGHT +
+                  distanceGuide.sourceRowIndex * TIMELINE_ROW_HEIGHT +
                   TIMELINE_ROW_HEIGHT / 2;
                 const targetCenterY =
                   distanceGuide.targetRowIndex * TIMELINE_ROW_HEIGHT +
@@ -578,6 +797,26 @@ export function TimelineGrid({
           </div>
 
           <div
+            className="pointer-events-none absolute z-10"
+            style={{
+              left: ROW_HEADER_WIDTH,
+              top: TIME_RULER_HEIGHT,
+              width: timelineWidth,
+              height: rows.length * TIMELINE_ROW_HEIGHT,
+            }}
+          >
+            {gridTicks.map((tick, index) => (
+              <div
+                key={index}
+                className={`absolute inset-y-0 w-px ${
+                  tick.isMajor ? "bg-slate-300/70" : "bg-slate-200/70"
+                }`}
+                style={{ left: tick.left }}
+              />
+            ))}
+          </div>
+
+          <div
             className="sticky top-0 z-50 grid border-b border-border/70 bg-[linear-gradient(180deg,rgba(255,255,255,0.96),rgba(246,250,252,0.92))] backdrop-blur"
             style={{
               gridTemplateColumns: `${ROW_HEADER_WIDTH}px ${timelineWidth}px`,
@@ -594,7 +833,7 @@ export function TimelineGrid({
             </div>
 
             <div
-              className={`relative border-l border-border/40 ${panState ? "cursor-grabbing" : "cursor-grab"}`}
+              className={`relative ${panState ? "cursor-grabbing" : "cursor-grab"}`}
               data-main-track="true"
               data-pan-track="true"
               style={{
@@ -610,23 +849,21 @@ export function TimelineGrid({
                   left: clamp(msToPx(playheadMs, zoomPxPerMinute), 0, timelineWidth),
                 }}
               />
-              {Array.from({ length: tickCount }).map((_, index) => {
-                const left = msToPx(index * renderedGridSizeMs, zoomPxPerMinute);
-                const isMajor = index % labelEvery === 0;
+              {gridTicks.map((tick, index) => {
                 return (
                   <div
                     key={index}
                     className="absolute inset-y-0"
-                    style={{ left }}
+                    style={{ left: tick.left }}
                   >
                     <div
                       className={`absolute inset-y-0 w-px ${
-                        isMajor ? "bg-slate-300" : "bg-slate-200/80"
+                        tick.isMajor ? "bg-slate-300" : "bg-slate-200/80"
                       }`}
                     />
-                    {isMajor ? (
+                    {tick.isMajor ? (
                       <div className="absolute left-2 top-2 font-mono text-[11px] text-muted-foreground">
-                        {formatTimelineTime(index * renderedGridSizeMs)}
+                        {formatTimelineTime(tick.timeMs)}
                       </div>
                     ) : null}
                   </div>
@@ -650,19 +887,29 @@ export function TimelineGrid({
                   row={row}
                   blockCount={rowBlocks.length}
                   onCreateBlock={() =>
-                    addBlock(row.id, snapMs(rowIndex * gridSizeMs * 2, gridSizeMs))
+                    addBlockWithCreationGuide(
+                      row.id,
+                      snapMs(rowIndex * gridSizeMs * 2, gridSizeMs),
+                    )
                   }
                 />
                 <TimelineRow
                   blocks={rowBlocks}
-                  gridSizeMs={renderedGridSizeMs}
                   isStriped={rowIndex % 2 === 1}
                   row={row}
+                  guideObscuredBlockIds={guideObscuredBlockIds}
                   selectedBlockIds={selectedBlockIds}
+                  syncSourcePickTargetBlockId={syncSourcePickTargetBlockId}
                   timelineWidth={timelineWidth}
                   totalDurationMs={totalDurationMs}
                   zoomPxPerMinute={zoomPxPerMinute}
                   onBlockPointerDown={(blockId, mode, event) => {
+                    if (syncSourcePickTargetBlockId) {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      return;
+                    }
+
                     if (event.metaKey || event.ctrlKey || event.shiftKey) {
                       return;
                     }
@@ -703,9 +950,29 @@ export function TimelineGrid({
                     });
                   }}
                   onCreateBlock={(timeMs) => {
-                    addBlock(row.id, snapMs(timeMs, gridSizeMs));
+                    addBlockWithCreationGuide(row.id, snapMs(timeMs, gridSizeMs));
                   }}
                   onOpenContextMenu={onOpenBlockContextMenu}
+                  onPickSyncSourceBlock={(sourceBlockId) => {
+                    if (!syncSourcePickTargetBlockId) {
+                      return;
+                    }
+
+                    const sourceBlock = getBlockById(blocks, sourceBlockId);
+                    if (!sourceBlock || sourceBlock.triggerMode !== "waveform") {
+                      return;
+                    }
+
+                    updateBlock(syncSourcePickTargetBlockId, {
+                      syncSourceBlockId: sourceBlockId,
+                    });
+                    window.dispatchEvent(
+                      new CustomEvent<{ targetBlockId: string }>("scheduler:sync-source-picked", {
+                        detail: { targetBlockId: syncSourcePickTargetBlockId },
+                      }),
+                    );
+                    setSyncSourcePickTargetBlock(null);
+                  }}
                   onOpenInsertMenu={(rowId, timeMs, x, y) => {
                     onOpenInsertContextMenu(rowId, snapMs(timeMs, gridSizeMs), x, y);
                   }}
