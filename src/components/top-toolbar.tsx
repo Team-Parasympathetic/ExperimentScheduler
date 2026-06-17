@@ -1,4 +1,6 @@
 import {
+  ChevronDown,
+  ChevronUp,
   FolderOpen,
   Gauge,
   Play,
@@ -129,6 +131,7 @@ const START_STATUS_TIMEOUT_MS = 5_000;
 const RUN_STATUS_POLL_INTERVAL_MS = 250;
 const UPLOAD_CONTROL_SAFETY_LOCKOUT_MS = 500;
 const CONTROL_MESSAGE_STACK_LIMIT = 3;
+const TOOLBAR_COLLAPSE_STORAGE_KEY = "experiment-scheduler:toolbar-collapsed";
 
 function delay(ms: number) {
   return new Promise((resolve) => {
@@ -194,6 +197,17 @@ export function TopToolbar({
   const [showStartDelayProgress, setShowStartDelayProgress] = useState(false);
   const [isUploadSafetyLockoutActive, setIsUploadSafetyLockoutActive] = useState(false);
   const [controlMessageStack, setControlMessageStack] = useState<string[]>([]);
+  const [isToolbarCollapsed, setIsToolbarCollapsed] = useState(() => {
+    if (typeof window === "undefined") {
+      return false;
+    }
+
+    try {
+      return window.localStorage.getItem(TOOLBAR_COLLAPSE_STORAGE_KEY) === "collapsed";
+    } catch {
+      return false;
+    }
+  });
   const uploadSafetyTimeoutRef = useRef<number | null>(null);
   const hasLoadedDefaultScheduleRef = useRef(false);
   const firmwareSummary = getFirmwareScheduleSummary(blocks, rows);
@@ -217,6 +231,23 @@ export function TopToolbar({
       ? [...controlMessageStack, uploadSafetyMessage]
       : controlMessageStack
   ).slice(-CONTROL_MESSAGE_STACK_LIMIT);
+
+  const toggleToolbarCollapsed = () => {
+    setIsToolbarCollapsed((current) => {
+      const nextCollapsed = !current;
+
+      try {
+        window.localStorage.setItem(
+          TOOLBAR_COLLAPSE_STORAGE_KEY,
+          nextCollapsed ? "collapsed" : "open",
+        );
+      } catch {
+        // Collapsing still works if local storage is unavailable.
+      }
+
+      return nextCollapsed;
+    });
+  };
 
   useEffect(() => {
     if (startDelayStartedAt === null) {
@@ -615,7 +646,9 @@ export function TopToolbar({
 
   return (
     <Card className="adaptive-toolbar glass-panel mb-4 overflow-hidden border-border/70 shadow-panel">
-      <CardContent className="toolbar-content space-y-4 p-4">
+      <CardContent
+        className={cn("toolbar-content p-4", isToolbarCollapsed ? "space-y-0" : "space-y-4")}
+      >
         <div className="toolbar-header flex flex-wrap items-start justify-between gap-4">
           <div className="toolbar-copy min-w-0">
             <h1 className="sr-only">Nectow Lab Experiment Scheduler</h1>
@@ -642,9 +675,24 @@ export function TopToolbar({
             >
               {firmwareSummary.eventCount}/{FIRMWARE_SCHEDULE_LIMITS.maxEvents} events
             </Badge>
+            <Button
+              aria-label={isToolbarCollapsed ? "Expand toolbar" : "Collapse toolbar"}
+              className="h-8 w-8 rounded-lg px-0"
+              size="sm"
+              title={isToolbarCollapsed ? "Expand toolbar" : "Collapse toolbar"}
+              variant="outline"
+              onClick={toggleToolbarCollapsed}
+            >
+              {isToolbarCollapsed ? (
+                <ChevronDown className="h-4 w-4" />
+              ) : (
+                <ChevronUp className="h-4 w-4" />
+              )}
+            </Button>
           </div>
         </div>
 
+        {isToolbarCollapsed ? null : (
         <div className="toolbar-deck thin-scrollbar flex gap-3 overflow-x-auto overflow-y-hidden pb-2">
           <div
             className={cn(
@@ -962,6 +1010,7 @@ export function TopToolbar({
             </Button>
           </div>
         </div>
+        )}
       </CardContent>
     </Card>
   );
