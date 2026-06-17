@@ -109,6 +109,7 @@ export function TimelineGrid({
   const gridSizeMs = useSchedulerStore((state) => state.gridSizeMs);
   const zoomPxPerMinute = useSchedulerStore((state) => state.zoomPxPerMinute);
   const playheadMs = useSchedulerStore((state) => state.playheadMs);
+  const selectedRowId = useSchedulerStore((state) => state.selectedRowId);
   const selectedBlockIds = useSchedulerStore((state) => state.selectedBlockIds);
   const syncSourcePickTargetBlockId = useSchedulerStore(
     (state) => state.syncSourcePickTargetBlockId,
@@ -137,6 +138,7 @@ export function TimelineGrid({
   const [creationGuideBlockIds, setCreationGuideBlockIds] = useState<string[]>([]);
 
   const timelineWidth = Math.max(msToPx(totalDurationMs, zoomPxPerMinute), 1200);
+  const playheadLeftPx = clamp(msToPx(playheadMs, zoomPxPerMinute), 0, timelineWidth);
   const renderedGridSizeMs = getVisibleGridSizeMs(gridSizeMs, zoomPxPerMinute);
   const labelEvery = getLabelEvery(renderedGridSizeMs, zoomPxPerMinute);
   const tickCount = Math.ceil(totalDurationMs / renderedGridSizeMs) + 1;
@@ -787,14 +789,15 @@ export function TimelineGrid({
           ) : null}
 
           <div
-            className="pointer-events-none absolute bottom-0 z-30 w-0"
+            className="pointer-events-none absolute z-30 w-px bg-[linear-gradient(180deg,rgba(244,63,94,0.95),rgba(244,63,94,0.38))] shadow-[0_0_12px_rgba(244,63,94,0.3)]"
             style={{
-              left: ROW_HEADER_WIDTH + clamp(msToPx(playheadMs, zoomPxPerMinute), 0, timelineWidth),
+              left: 0,
               top: TIME_RULER_HEIGHT,
+              height: rows.length * TIMELINE_ROW_HEIGHT,
+              transform: `translate3d(${ROW_HEADER_WIDTH + playheadLeftPx}px, 0, 0) translateX(-50%)`,
+              willChange: "transform",
             }}
-          >
-            <div className="absolute bottom-0 top-0 left-0 w-px -translate-x-1/2 bg-[linear-gradient(180deg,rgba(244,63,94,0.95),rgba(244,63,94,0.38))] shadow-[0_0_12px_rgba(244,63,94,0.3)]" />
-          </div>
+          />
 
           <div
             className="pointer-events-none absolute z-10"
@@ -844,9 +847,10 @@ export function TimelineGrid({
                 {secondsPerDivisionLabel}
               </div>
               <div
-                className="pointer-events-none absolute top-2 z-20 h-3 w-3 -translate-x-1/2 rounded-full border-2 border-white bg-rose-500 shadow-[0_6px_18px_rgba(244,63,94,0.35)]"
+                className="pointer-events-none absolute left-0 top-2 z-20 h-3 w-3 rounded-full border-2 border-white bg-rose-500 shadow-[0_6px_18px_rgba(244,63,94,0.35)]"
                 style={{
-                  left: clamp(msToPx(playheadMs, zoomPxPerMinute), 0, timelineWidth),
+                  transform: `translate3d(${playheadLeftPx}px, 0, 0) translateX(-50%)`,
+                  willChange: "transform",
                 }}
               />
               {gridTicks.map((tick, index) => {
@@ -874,6 +878,7 @@ export function TimelineGrid({
 
           {rows.map((row, rowIndex) => {
             const rowBlocks = getSortedRowBlocks(blocks, row.id);
+            const isHighlightedRow = row.id === selectedRowId;
             return (
               <div
                 key={row.id}
@@ -886,6 +891,7 @@ export function TimelineGrid({
                 <RowSidebar
                   row={row}
                   blockCount={rowBlocks.length}
+                  isHighlighted={isHighlightedRow}
                   onCreateBlock={() =>
                     addBlockWithCreationGuide(
                       row.id,
@@ -895,6 +901,7 @@ export function TimelineGrid({
                 />
                 <TimelineRow
                   blocks={rowBlocks}
+                  isHighlighted={isHighlightedRow}
                   isStriped={rowIndex % 2 === 1}
                   row={row}
                   guideObscuredBlockIds={guideObscuredBlockIds}

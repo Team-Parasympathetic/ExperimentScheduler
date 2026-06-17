@@ -18,6 +18,7 @@ interface TimelineRowProps {
   selectedBlockIds: string[];
   guideObscuredBlockIds: Set<string>;
   syncSourcePickTargetBlockId: string | null;
+  isHighlighted?: boolean;
   isStriped: boolean;
   onSelectBlock: (
     blockId: string,
@@ -39,6 +40,7 @@ export function TimelineRow({
   row,
   blocks,
   isStriped,
+  isHighlighted = false,
   onBlockPointerDown,
   onCreateBlock,
   onOpenContextMenu,
@@ -121,6 +123,9 @@ export function TimelineRow({
               : "bg-scheduler-lane/80",
         )}
       />
+      {isHighlighted ? (
+        <div className="pointer-events-none absolute inset-y-1 left-2 right-2 rounded-xl bg-rose-100/20 opacity-95 shadow-[0_0_30px_rgba(244,63,94,0.32),inset_0_0_26px_rgba(255,255,255,0.44),inset_0_0_18px_rgba(244,63,94,0.16)]" />
+      ) : null}
       {isScheduleStatus ? (
         <>
           <div className="pointer-events-none absolute inset-0 bg-[repeating-linear-gradient(135deg,rgba(14,116,144,0.11)_0,rgba(14,116,144,0.11)_8px,rgba(255,255,255,0)_8px,rgba(255,255,255,0)_16px)]" />

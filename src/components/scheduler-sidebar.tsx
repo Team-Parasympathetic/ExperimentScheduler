@@ -1,5 +1,6 @@
 import { useState } from "react";
 import {
+  Box,
   ChevronLeft,
   ChevronRight,
   FlaskConical,
@@ -7,11 +8,12 @@ import {
 } from "lucide-react";
 import { DeviceOverviewPanel } from "@/components/device-overview-panel";
 import { PumpCalibrationPanel } from "@/components/pump-calibration-panel";
+import { PumpSetupPanel } from "@/components/pump-setup-panel";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 
-type SidebarView = "devices" | "calibration";
+type SidebarView = "devices" | "calibration" | "setup";
 
 interface SchedulerSidebarProps {
   collapsed: boolean;
@@ -35,6 +37,12 @@ const SIDEBAR_VIEWS: Array<{
     label: "Pump Calibration",
     eyebrow: "Calibration",
     Icon: FlaskConical,
+  },
+  {
+    id: "setup",
+    label: "3D Setup",
+    eyebrow: "Setup",
+    Icon: Box,
   },
 ];
 
@@ -97,6 +105,8 @@ export function SchedulerSidebar({
               <DeviceOverviewPanel />
             ) : activeView === "calibration" ? (
               <PumpCalibrationPanel />
+            ) : activeView === "setup" ? (
+              <PumpSetupPanel />
             ) : null}
           </div>
         )}

@@ -1,4 +1,8 @@
-import { invoke } from "@tauri-apps/api/core";
+import {
+  hasTauriRuntime,
+  invokeTauri,
+  TAURI_UNAVAILABLE_MESSAGE,
+} from "@/lib/tauri-runtime";
 import type {
   BoardCommandResult,
   DeviceSlotInfo,
@@ -15,7 +19,17 @@ export interface DeviceDetectionResult {
 }
 
 export function detectBackplane(portName: string) {
-  return invoke<DeviceDetectionResult>("detect_backplane", { portName });
+  if (!hasTauriRuntime()) {
+    return Promise.resolve<DeviceDetectionResult>({
+      detected: false,
+      message: TAURI_UNAVAILABLE_MESSAGE,
+      portName,
+      slots: [],
+      log: [],
+    });
+  }
+
+  return invokeTauri<DeviceDetectionResult>("detect_backplane", { portName });
 }
 
 export function uploadBoardSchedule({
@@ -27,7 +41,7 @@ export function uploadBoardSchedule({
   portName: string;
   rows: Row[];
 }) {
-  return invoke<BoardCommandResult>("upload_schedule", {
+  return invokeTauri<BoardCommandResult>("upload_schedule", {
     portName,
     rows,
     blocks,
@@ -35,13 +49,13 @@ export function uploadBoardSchedule({
 }
 
 export function startBoardSchedule(portName: string) {
-  return invoke<BoardCommandResult>("start_schedule", { portName });
+  return invokeTauri<BoardCommandResult>("start_schedule", { portName });
 }
 
 export function stopBoardSchedule(portName: string) {
-  return invoke<BoardCommandResult>("stop_schedule", { portName });
+  return invokeTauri<BoardCommandResult>("stop_schedule", { portName });
 }
 
 export function getBoardStatus(portName: string) {
-  return invoke<BoardCommandResult>("get_status", { portName });
+  return invokeTauri<BoardCommandResult>("get_status", { portName });
 }

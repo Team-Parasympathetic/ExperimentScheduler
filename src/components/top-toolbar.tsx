@@ -273,7 +273,7 @@ export function TopToolbar({
     }
 
     setControlMessageStack((currentMessages) => {
-      if (currentMessages.at(-1) === nextMessage) {
+      if (currentMessages[currentMessages.length - 1] === nextMessage) {
         return currentMessages;
       }
 

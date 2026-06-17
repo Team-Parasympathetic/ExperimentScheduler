@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { hasTauriRuntime, invokeTauri } from "@/lib/tauri-runtime";
 
 export type ProjectDataFolder = "calibrations" | "schedules";
 
@@ -23,7 +23,11 @@ export function normalizeJsonFileName(fileName: string, fallbackPrefix: string) 
 }
 
 export function listProjectJsonFiles(folder: ProjectDataFolder) {
-  return invoke<string[]>("list_data_files", { folder });
+  if (!hasTauriRuntime()) {
+    return Promise.resolve([]);
+  }
+
+  return invokeTauri<string[]>("list_data_files", { folder });
 }
 
 export function saveProjectJsonFile({
@@ -35,7 +39,7 @@ export function saveProjectJsonFile({
   fileName: string;
   folder: ProjectDataFolder;
 }) {
-  return invoke<string>("save_data_file", {
+  return invokeTauri<string>("save_data_file", {
     folder,
     fileName: normalizeJsonFileName(fileName, folder),
     content: JSON.stringify(content, null, 2),
@@ -43,13 +47,13 @@ export function saveProjectJsonFile({
 }
 
 export function deleteProjectJsonFile(folder: ProjectDataFolder, fileName: string) {
-  return invoke<string>("delete_data_file", {
+  return invokeTauri<string>("delete_data_file", {
     folder,
     fileName,
   });
 }
 
 export async function loadProjectJsonFile<T>(folder: ProjectDataFolder, fileName: string) {
-  const content = await invoke<string>("load_data_file", { folder, fileName });
+  const content = await invokeTauri<string>("load_data_file", { folder, fileName });
   return JSON.parse(content) as T;
 }
