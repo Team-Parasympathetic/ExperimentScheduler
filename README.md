@@ -29,7 +29,7 @@ cd ExperimentScheduler
 .\Install-Lab-App.cmd
 ```
 
-The installer builds the desktop app and creates fresh **Experiment Scheduler** shortcuts on the Desktop and in the Start Menu. The Start Menu shortcut cleanup removes stale shortcuts with the same app name before recreating the current one.
+The installer builds the desktop app and creates fresh **Experiment Scheduler** shortcuts on the Desktop and in the Start Menu.
 
 To update an existing lab PC checkout:
 
@@ -37,14 +37,6 @@ To update an existing lab PC checkout:
 cd C:\Users\ARN_s\ExperimentScheduler
 git pull
 .\Install-Lab-App.cmd
-```
-
-If PowerShell blocks `npm`, use `npm.cmd` directly for manual commands, or run the provided installer script, which uses PowerShell's bypass mode internally.
-
-To recreate shortcuts without rebuilding:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\setup-lab-app.ps1 -SkipBuild
 ```
 
 ## Development
