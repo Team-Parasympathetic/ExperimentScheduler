@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 const WINDOW_MARGIN = 12;
+const MIN_FLOATING_WINDOW_WIDTH = 220;
 
 interface FloatingWindowProps {
   title: string;
@@ -54,6 +55,17 @@ function getWindowBounds(width: number, height: number) {
   };
 }
 
+function getResolvedWindowWidth(width: number) {
+  if (typeof window === "undefined") {
+    return width;
+  }
+
+  return Math.min(
+    width,
+    Math.max(MIN_FLOATING_WINDOW_WIDTH, window.innerWidth - WINDOW_MARGIN * 2),
+  );
+}
+
 function clampWindowPosition(position: WindowPosition, width: number, height: number) {
   const bounds = getWindowBounds(width, height);
 
@@ -85,12 +97,17 @@ export function FloatingWindow({
         ? Math.min(maxHeight, window.innerHeight - WINDOW_MARGIN * 2)
         : `calc(100vh - ${WINDOW_MARGIN * 2}px)`;
   const [position, setPosition] = useState<WindowPosition>(() =>
-    clampWindowPosition({ left: x, top: y }, width, maxHeight ?? 360),
+    clampWindowPosition(
+      { left: x, top: y },
+      getResolvedWindowWidth(width),
+      maxHeight ?? 360,
+    ),
   );
+  const resolvedWidth = getResolvedWindowWidth(width);
 
   useLayoutEffect(() => {
     const measuredHeight = ref.current?.offsetHeight ?? maxHeight ?? 360;
-    setPosition(clampWindowPosition({ left: x, top: y }, width, measuredHeight));
+    setPosition(clampWindowPosition({ left: x, top: y }, resolvedWidth, measuredHeight));
   }, [maxHeight, width, x, y]);
 
   useEffect(() => {
@@ -109,7 +126,7 @@ export function FloatingWindow({
     const handleResize = () => {
       const measuredHeight = ref.current?.offsetHeight ?? maxHeight ?? 360;
       setPosition((currentPosition) =>
-        clampWindowPosition(currentPosition, width, measuredHeight),
+        clampWindowPosition(currentPosition, resolvedWidth, measuredHeight),
       );
     };
 
@@ -122,7 +139,7 @@ export function FloatingWindow({
       window.removeEventListener("keydown", handleEscape);
       window.removeEventListener("resize", handleResize);
     };
-  }, [maxHeight, onClose, width]);
+  }, [maxHeight, onClose, resolvedWidth]);
 
   useEffect(() => {
     const handlePointerMove = (event: PointerEvent) => {
@@ -139,7 +156,7 @@ export function FloatingWindow({
             left: dragState.originLeft + event.clientX - dragState.originX,
             top: dragState.originTop + event.clientY - dragState.originY,
           },
-          width,
+          resolvedWidth,
           measuredHeight,
         ),
       );
@@ -160,7 +177,7 @@ export function FloatingWindow({
       window.removeEventListener("pointerup", handlePointerUp);
       window.removeEventListener("pointercancel", handlePointerUp);
     };
-  }, [maxHeight, width]);
+  }, [maxHeight, resolvedWidth]);
 
   const startDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) {
@@ -189,7 +206,7 @@ export function FloatingWindow({
         left: position.left,
         maxHeight: resolvedMaxHeight,
         top: position.top,
-        width,
+        width: resolvedWidth,
       }}
     >
       <div className="flex min-h-0 w-full flex-col">

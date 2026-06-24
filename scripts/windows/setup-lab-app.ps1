@@ -23,16 +23,56 @@ function Assert-Command {
 
 function New-AppShortcut {
   param(
-    [string]$ShortcutPath
+    [string]$ShortcutPath,
+    [switch]$UseExplorerLauncher
   )
+
+  $shortcutDir = Split-Path $ShortcutPath -Parent
+  New-Item -ItemType Directory -Force -Path $shortcutDir | Out-Null
+
+  if (Test-Path $ShortcutPath) {
+    try {
+      Set-ItemProperty -LiteralPath $ShortcutPath -Name Attributes -Value "Normal"
+      Remove-Item -LiteralPath $ShortcutPath -Force
+    } catch {
+      throw "Could not replace shortcut $ShortcutPath. Original error: $($_.Exception.Message)"
+    }
+  }
 
   $shell = New-Object -ComObject WScript.Shell
   $shortcut = $shell.CreateShortcut($ShortcutPath)
-  $shortcut.TargetPath = $exePath
+  if ($UseExplorerLauncher) {
+    $shortcut.TargetPath = Join-Path $env:SystemRoot "explorer.exe"
+    $shortcut.Arguments = "`"$exePath`""
+  } else {
+    $shortcut.TargetPath = $exePath
+    $shortcut.Arguments = ""
+  }
   $shortcut.WorkingDirectory = Split-Path $exePath -Parent
   $shortcut.IconLocation = "$exePath,0"
   $shortcut.Description = "Launch $appName"
   $shortcut.Save()
+}
+
+function Remove-StaleStartMenuShortcuts {
+  $startMenuRoots = @(
+    [Environment]::GetFolderPath("Programs"),
+    [Environment]::GetFolderPath("CommonPrograms")
+  ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+
+  foreach ($root in $startMenuRoots) {
+    Get-ChildItem -Path $root -Filter "$appName.lnk" -Recurse -ErrorAction SilentlyContinue |
+      ForEach-Object {
+        $shortcutPath = $_.FullName
+        try {
+          Set-ItemProperty -LiteralPath $shortcutPath -Name Attributes -Value "Normal"
+          Remove-Item -LiteralPath $shortcutPath -Force
+          Write-Host "Removed stale Start Menu shortcut: $shortcutPath"
+        } catch {
+          Write-Host "Could not remove stale Start Menu shortcut ${shortcutPath}: $($_.Exception.Message)"
+        }
+      }
+  }
 }
 
 function Stop-ExistingAppProcess {
@@ -113,10 +153,11 @@ if ($createDesktop) {
 }
 
 if ($createStartMenu) {
+  Remove-StaleStartMenuShortcuts
   $startMenuDir = Join-Path ([Environment]::GetFolderPath("Programs")) $appName
   New-Item -ItemType Directory -Force -Path $startMenuDir | Out-Null
   $startMenuShortcut = Join-Path $startMenuDir "$appName.lnk"
-  New-AppShortcut $startMenuShortcut
+  New-AppShortcut $startMenuShortcut -UseExplorerLauncher
   Write-Host "Created Start Menu shortcut: $startMenuShortcut"
 }
 

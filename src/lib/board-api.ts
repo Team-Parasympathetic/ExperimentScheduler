@@ -52,6 +52,10 @@ export function startBoardSchedule(portName: string) {
   return invokeTauri<BoardCommandResult>("start_schedule", { portName });
 }
 
+export function prepareBoardSchedule(portName: string) {
+  return invokeTauri<BoardCommandResult>("prepare_schedule", { portName });
+}
+
 export function stopBoardSchedule(portName: string) {
   return invokeTauri<BoardCommandResult>("stop_schedule", { portName });
 }

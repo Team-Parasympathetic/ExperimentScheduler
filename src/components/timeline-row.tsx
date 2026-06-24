@@ -22,8 +22,9 @@ interface TimelineRowProps {
   isStriped: boolean;
   onSelectBlock: (
     blockId: string,
-    options?: { additive?: boolean; range?: boolean },
+    options?: { additive?: boolean },
   ) => void;
+  onClearSelection: () => void;
   onPickSyncSourceBlock: (blockId: string) => void;
   onSetPasteTarget: (rowId: string, timeMs: number) => void;
   onOpenContextMenu: (blockId: string, x: number, y: number) => void;
@@ -46,6 +47,7 @@ export function TimelineRow({
   onOpenContextMenu,
   onOpenInsertMenu,
   onPickSyncSourceBlock,
+  onClearSelection,
   onSelectBlock,
   onSetPasteTarget,
   selectedBlockIds,
@@ -72,6 +74,13 @@ export function TimelineRow({
 
         const target = event.target as HTMLElement | null;
         if (target?.closest("[data-block-root='true']")) {
+          return;
+        }
+
+        if (selectedBlockIds.length > 0) {
+          event.preventDefault();
+          event.stopPropagation();
+          onClearSelection();
           return;
         }
 
@@ -124,7 +133,7 @@ export function TimelineRow({
         )}
       />
       {isHighlighted ? (
-        <div className="pointer-events-none absolute inset-y-1 left-2 right-2 rounded-xl bg-rose-100/20 opacity-95 shadow-[0_0_30px_rgba(244,63,94,0.32),inset_0_0_26px_rgba(255,255,255,0.44),inset_0_0_18px_rgba(244,63,94,0.16)]" />
+        <div className="pointer-events-none absolute inset-y-1 left-2 right-2 rounded-xl bg-emerald-100/24 opacity-95 shadow-[0_0_30px_rgba(16,185,129,0.32),inset_0_0_26px_rgba(255,255,255,0.44),inset_0_0_18px_rgba(16,185,129,0.16)]" />
       ) : null}
       {isScheduleStatus ? (
         <>
@@ -161,7 +170,9 @@ export function TimelineRow({
           onContextMenu={(event) => {
             event.preventDefault();
             event.stopPropagation();
-            onSelectBlock(block.id);
+            if (!selectedBlockIds.includes(block.id)) {
+              onSelectBlock(block.id);
+            }
             onOpenContextMenu(block.id, event.clientX, event.clientY);
           }}
           onPointerDownMove={(event) => onBlockPointerDown(block.id, "move", event)}
@@ -175,8 +186,7 @@ export function TimelineRow({
             syncSourcePickTargetBlockId
               ? onPickSyncSourceBlock(block.id)
               : onSelectBlock(block.id, {
-                  additive: event.metaKey || event.ctrlKey,
-                  range: event.shiftKey,
+                  additive: event.metaKey || event.ctrlKey || event.shiftKey,
                 })
           }
         />

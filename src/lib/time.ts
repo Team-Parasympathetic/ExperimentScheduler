@@ -19,10 +19,12 @@ export const GRID_OPTIONS = [
   { label: "1 min", value: 60_000 },
 ];
 
-export const MIN_ZOOM_PX_PER_MINUTE = 600;
+export const MIN_ZOOM_PX_PER_MINUTE = 300;
 export const MAX_ZOOM_PX_PER_MINUTE = 96_000;
 export const ZOOM_LEVELS = [
   MIN_ZOOM_PX_PER_MINUTE,
+  450,
+  600,
   900,
   1_200,
   1_800,

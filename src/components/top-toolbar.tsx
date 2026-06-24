@@ -51,6 +51,7 @@ import {
 } from "@/lib/project-files";
 import {
   getBoardStatus,
+  prepareBoardSchedule,
   startBoardSchedule,
   stopBoardSchedule,
   uploadBoardSchedule,
@@ -62,7 +63,7 @@ import {
 } from "@/store/board-store";
 import { usePumpCalibrationStore } from "@/store/pump-calibration-store";
 import { useSchedulerStore } from "@/store/scheduler-store";
-import type { Block, DeviceType, Row } from "@/types/scheduler";
+import type { Block, DeviceType, PumpModelSlot, Row } from "@/types/scheduler";
 
 interface ScheduleFile {
   kind: "experimentSchedule";
@@ -70,6 +71,7 @@ interface ScheduleFile {
   savedAt: string;
   rows: Row[];
   blocks: Block[];
+  pumpModelSlots: PumpModelSlot[];
   gridSizeMs: number;
   zoomPxPerMinute: number;
   experimentDurationMs: number;
@@ -103,6 +105,9 @@ function normalizeScheduleFile(file: unknown): ScheduleFile {
     savedAt: typeof file.savedAt === "string" ? file.savedAt : new Date().toISOString(),
     rows: file.rows as Row[],
     blocks: file.blocks as Block[],
+    pumpModelSlots: Array.isArray(file.pumpModelSlots)
+      ? (file.pumpModelSlots as PumpModelSlot[])
+      : [],
     gridSizeMs: normalizeNumber(file.gridSizeMs, GRID_OPTIONS[1]?.value ?? 500),
     zoomPxPerMinute: normalizeNumber(file.zoomPxPerMinute, DEFAULT_ZOOM_PX_PER_MINUTE),
     experimentDurationMs: normalizeNumber(
@@ -126,7 +131,7 @@ const SCHED_IDLE = 0;
 const SCHED_STOPPED = 3;
 const SCHED_ERROR = 4;
 const START_STATUS_POLL_INTERVAL_MS = 100;
-const START_PRELOAD_PROGRESS_MS = 1_000;
+const START_PRELOAD_PROGRESS_MS = 2_000;
 const START_STATUS_TIMEOUT_MS = 5_000;
 const RUN_STATUS_POLL_INTERVAL_MS = 250;
 const UPLOAD_CONTROL_SAFETY_LOCKOUT_MS = 500;
@@ -147,6 +152,7 @@ export function TopToolbar({
 }: TopToolbarProps) {
   const rows = useSchedulerStore((state) => state.rows);
   const blocks = useSchedulerStore((state) => state.blocks);
+  const pumpModelSlots = useSchedulerStore((state) => state.pumpModelSlots);
   const gridSizeMs = useSchedulerStore((state) => state.gridSizeMs);
   const zoomPxPerMinute = useSchedulerStore((state) => state.zoomPxPerMinute);
   const experimentState = useSchedulerStore((state) => state.experimentState);
@@ -196,6 +202,8 @@ export function TopToolbar({
   const [startDelayProgress, setStartDelayProgress] = useState(0);
   const [showStartDelayProgress, setShowStartDelayProgress] = useState(false);
   const [isUploadSafetyLockoutActive, setIsUploadSafetyLockoutActive] = useState(false);
+  const [isScheduleUploaded, setIsScheduleUploaded] = useState(false);
+  const [isSchedulePreparedReady, setIsSchedulePreparedReady] = useState(false);
   const [controlMessageStack, setControlMessageStack] = useState<string[]>([]);
   const [isToolbarCollapsed, setIsToolbarCollapsed] = useState(() => {
     if (typeof window === "undefined") {
@@ -221,7 +229,10 @@ export function TopToolbar({
   const canUploadSchedule =
     firmwareSummary.isWithinLimits && firmwareSummary.eventCount > 0 && !isBoardBusy;
   const canStartSchedule =
-    !isBoardBusy && !isUploadSafetyLockoutActive && experimentState !== "running";
+    isScheduleUploaded &&
+    !isBoardBusy &&
+    !isUploadSafetyLockoutActive &&
+    experimentState !== "running";
   const canStopSchedule = !isBoardBusy && !isUploadSafetyLockoutActive;
   const uploadSafetyMessage = isUploadSafetyLockoutActive
     ? `Start/stop locked for ${UPLOAD_CONTROL_SAFETY_LOCKOUT_MS / 1_000}s after upload.`
@@ -264,6 +275,11 @@ export function TopToolbar({
 
     return () => window.clearInterval(intervalId);
   }, [startDelayStartedAt]);
+
+  useEffect(() => {
+    setIsScheduleUploaded(false);
+    setIsSchedulePreparedReady(false);
+  }, [blocks, calibrationsByRowId, rows]);
 
   useEffect(() => {
     const nextMessage = scheduleMessage.trim();
@@ -340,6 +356,7 @@ export function TopToolbar({
       loadSchedule({
         rows: scheduleFile.rows,
         blocks: scheduleFile.blocks,
+        pumpModelSlots: scheduleFile.pumpModelSlots,
         gridSizeMs: scheduleFile.gridSizeMs,
         zoomPxPerMinute: scheduleFile.zoomPxPerMinute,
         experimentDurationMs: scheduleFile.experimentDurationMs,
@@ -481,6 +498,10 @@ export function TopToolbar({
         setScheduleMessage("Schedule stopped.");
         resetExperiment();
         resetStartDelayProgress();
+        setIsSchedulePreparedReady(false);
+        setIsScheduleUploaded(
+          Boolean(status.eventCount > 0 && status.stateCode !== SCHED_IDLE),
+        );
         return;
       }
     }
@@ -504,10 +525,23 @@ export function TopToolbar({
       command === "upload" ? "Upload" : command === "start" ? "Start" : "Stop";
 
     setScheduleCommandState(command);
-    setScheduleMessage(`${commandLabel} in progress on ${trimmedComPort || "COM port"}...`);
+    setScheduleMessage(
+      command === "upload"
+        ? `Uploading schedule on ${trimmedComPort || "COM port"}...`
+        : `${commandLabel} in progress on ${trimmedComPort || "COM port"}...`,
+    );
 
     if (command === "start" || command === "upload" || command === "stop") {
       resetStartDelayProgress();
+    }
+
+    if (command === "upload") {
+      setIsScheduleUploaded(false);
+      setIsSchedulePreparedReady(false);
+    }
+
+    if (command === "start" && !isSchedulePreparedReady) {
+      beginStartDelayProgress();
     }
 
     if (command === "upload" || command === "stop") {
@@ -515,49 +549,87 @@ export function TopToolbar({
     }
 
     try {
+      if (command === "upload") {
+        const uploadResult = await uploadBoardSchedule({
+          portName: trimmedComPort,
+          rows,
+          blocks: applyPumpCalibrationToBlocksByRowId(
+            blocks,
+            rows,
+            calibrationsByRowId,
+          ),
+        });
+
+        appendSerialLog(uploadResult.log, `# Upload ${trimmedComPort || "COM port"}`);
+        if (!uploadResult.ok) {
+          setScheduleMessage(`Failed: ${uploadResult.message}`);
+          setIsScheduleUploaded(false);
+          setIsSchedulePreparedReady(false);
+          return;
+        }
+
+        setIsScheduleUploaded(true);
+        setScheduleMessage("Schedule uploaded. Preloading pump speeds and start warmup...");
+        beginStartDelayProgress();
+
+        const prepareResult = await prepareBoardSchedule(trimmedComPort);
+        appendSerialLog(prepareResult.log, `# Prepare ${trimmedComPort || "COM port"}`);
+        setScheduleMessage(
+          prepareResult.ok ? prepareResult.message : `Failed: ${prepareResult.message}`,
+        );
+
+        if (!prepareResult.ok) {
+          resetStartDelayProgress();
+          setIsScheduleUploaded(false);
+          setIsSchedulePreparedReady(false);
+          return;
+        }
+
+        resetExperiment();
+        setStartDelayStartedAt(null);
+        setStartDelayProgress(100);
+        setIsSchedulePreparedReady(true);
+        beginUploadSafetyLockout();
+        return;
+      }
+
       const result =
-        command === "upload"
-          ? await uploadBoardSchedule({
-              portName: trimmedComPort,
-              rows,
-              blocks: applyPumpCalibrationToBlocksByRowId(
-                blocks,
-                rows,
-                calibrationsByRowId,
-              ),
-            })
-          : command === "start"
-            ? await startBoardSchedule(trimmedComPort)
-            : await stopBoardSchedule(trimmedComPort);
+        command === "start"
+          ? await startBoardSchedule(trimmedComPort)
+          : await stopBoardSchedule(trimmedComPort);
 
       appendSerialLog(result.log, `# ${commandLabel} ${trimmedComPort || "COM port"}`);
       setScheduleMessage(result.ok ? result.message : `Failed: ${result.message}`);
 
-      if (result.ok && command === "upload") {
-        resetExperiment();
-        beginUploadSafetyLockout();
-      }
-
       if (result.ok && command === "start") {
-        beginStartDelayProgress();
         await waitForBoardStart(trimmedComPort);
-        setStartDelayStartedAt(null);
-        setStartDelayProgress(100);
+        resetStartDelayProgress();
+        setIsSchedulePreparedReady(false);
+        setIsScheduleUploaded(true);
         startExperiment(0);
         setScheduleMessage("Board is running.");
         void monitorBoardRun(trimmedComPort);
       }
 
       if (result.ok && command === "stop") {
+        const status = result.status;
         resetExperiment();
         resetStartDelayProgress();
+        setIsSchedulePreparedReady(false);
+        setIsScheduleUploaded(
+          Boolean(status && status.eventCount > 0 && status.stateCode !== SCHED_IDLE),
+        );
       }
     } catch (error) {
       setScheduleMessage(
         `Failed: ${error instanceof Error ? error.message : String(error)}`,
       );
-      if (command === "start") {
+      if (command === "start" || command === "upload") {
         resetStartDelayProgress();
+      }
+      if (command === "upload") {
+        setIsScheduleUploaded(false);
+        setIsSchedulePreparedReady(false);
       }
     } finally {
       setScheduleCommandState(null);
@@ -588,6 +660,7 @@ export function TopToolbar({
         savedAt: new Date().toISOString(),
         rows,
         blocks,
+        pumpModelSlots,
         gridSizeMs,
         zoomPxPerMinute,
         experimentDurationMs: totalDurationMs,
@@ -782,7 +855,7 @@ export function TopToolbar({
             {showStartDelayProgress ? (
               <div className="mt-2 rounded-lg border border-cyan-100 bg-cyan-50/70 px-2 py-1.5">
                 <div className="mb-1 flex items-center justify-between gap-2 text-[10px] font-medium text-cyan-800">
-                  <span>Start warmup</span>
+                  <span>Pump preload / start warmup</span>
                   <span>{Math.round(startDelayProgress)}%</span>
                 </div>
                 <div className="h-1.5 overflow-hidden rounded-full bg-cyan-100">

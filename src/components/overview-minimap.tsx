@@ -23,7 +23,14 @@ export function OverviewMinimap({
 }: OverviewMinimapProps) {
   const playheadMs = useSchedulerStore((state) => state.playheadMs);
   const [isDragging, setIsDragging] = useState(false);
-  const rowHeight = 16;
+  const trackAreaHeight = 148;
+  const rowGap = rows.length > 1 ? 4 : 0;
+  const rowHeight = rows.length > 0
+    ? Math.max(
+        5,
+        Math.min(16, (trackAreaHeight - rowGap * (rows.length - 1)) / rows.length),
+      )
+    : 16;
   const viewportWidthPercent = Math.min(
     100,
     Math.max(8, (viewportDurationMs / totalDurationMs) * 100),
@@ -81,17 +88,20 @@ export function OverviewMinimap({
         }}
       >
         <div className="absolute inset-0 bg-[linear-gradient(90deg,rgba(148,163,184,0.06),transparent_25%,transparent_75%,rgba(148,163,184,0.06))]" />
-        <div className="relative">
-          {rows.map((row) => (
+        <div className="relative" style={{ height: trackAreaHeight }}>
+          {rows.map((row, rowIndex) => (
             <div
               key={row.id}
               className={cn(
-                "relative mb-1 overflow-hidden rounded-md",
+                "absolute left-0 right-0 overflow-hidden rounded-md",
                 row.isScheduleStatus
                   ? "bg-cyan-50/90 shadow-[inset_0_0_0_1px_rgba(14,116,144,0.12)]"
                   : "bg-white/80",
               )}
-              style={{ height: rowHeight }}
+              style={{
+                height: rowHeight,
+                top: rowIndex * (rowHeight + rowGap),
+              }}
             >
               {row.isScheduleStatus ? (
                 <div className="pointer-events-none absolute inset-0 bg-[repeating-linear-gradient(135deg,rgba(14,116,144,0.16)_0,rgba(14,116,144,0.16)_4px,rgba(255,255,255,0)_4px,rgba(255,255,255,0)_8px)]" />
@@ -104,7 +114,7 @@ export function OverviewMinimap({
                   <div
                     key={block.id}
                     className={cn(
-                      "absolute top-1/2 h-2.5 -translate-y-1/2 rounded-full",
+                      "absolute top-1/2 -translate-y-1/2 rounded-full",
                       row.deviceType === "trigger"
                         ? isAlternateShade
                           ? "bg-violet-500 shadow-[0_0_20px_rgba(139,92,246,0.2)]"
@@ -113,7 +123,11 @@ export function OverviewMinimap({
                           ? "bg-orange-500 shadow-[0_0_20px_rgba(251,146,60,0.2)]"
                           : "bg-orange-300 shadow-[0_0_20px_rgba(251,146,60,0.18)]",
                     )}
-                    style={{ left: `${left}%`, width: `${width}%` }}
+                    style={{
+                      height: Math.max(3, Math.min(10, rowHeight * 0.68)),
+                      left: `${left}%`,
+                      width: `${width}%`,
+                    }}
                   />
                 );
               })}

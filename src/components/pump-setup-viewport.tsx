@@ -1,8 +1,8 @@
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Html, OrbitControls, useCursor, useGLTF } from "@react-three/drei";
 import { Bloom, EffectComposer } from "@react-three/postprocessing";
-import { Crosshair, MousePointer2, Pause, Play, RefreshCw, RotateCcw, Trash2 } from "lucide-react";
+import { Crosshair, MousePointer2, RefreshCw, RotateCcw, Trash2 } from "lucide-react";
 import * as THREE from "three";
 import type { ThreeEvent } from "@react-three/fiber";
 import { FloatingWindow } from "@/components/floating-window";
@@ -13,8 +13,9 @@ import bodyModelUrl from "@/assets/models/pump-body.glb?url";
 import headModelUrl from "@/assets/models/pump-head.glb?url";
 import { getBlockEnd } from "@/lib/time";
 import { cn } from "@/lib/utils";
+import { useEncoderStore } from "@/store/encoder-store";
 import { useSchedulerStore } from "@/store/scheduler-store";
-import type { Block, Direction, Row } from "@/types/scheduler";
+import type { Block, Direction, PumpModelSlot, Row } from "@/types/scheduler";
 
 const BODY_MODEL_URL = bodyModelUrl;
 const HEAD_MODEL_URL = headModelUrl;
@@ -32,20 +33,13 @@ const PUMP_MODEL_HEIGHT = PUMP_BODY_HEIGHT * MODEL_SCALE;
 const PUMP_MODEL_DEPTH = PUMP_BODY_DEPTH * MODEL_SCALE;
 const PUMP_SIDE_SLOT_OFFSET = PUMP_MODEL_WIDTH + 0.12;
 const PUMP_VERTICAL_SLOT_OFFSET = PUMP_MODEL_HEIGHT + 0.12;
-const PUMP_MODEL_LAYOUT_STORAGE_KEY = "experiment-scheduler:pump-model-layout";
 const ARROW_FRONT_OFFSET = new THREE.Vector3(0, 0, 2.2);
 const ARROW_HEAD_BLUE = "#0284c7";
 const ARROW_TAIL_BLUE = "#bfdbfe";
+const ENCODER_CHANNEL_OPTIONS = Array.from({ length: 8 }, (_, channel) => channel);
+const PUMP_MOTION_RPM_THRESHOLD = 0.2;
 
 type CandidateDirection = "left" | "right" | "up" | "down";
-
-interface PumpModelSlot {
-  id: string;
-  rowId: string;
-  x: number;
-  y: number;
-  z: number;
-}
 
 interface CandidatePumpSlot {
   sourceSlotId: string;
@@ -71,6 +65,7 @@ interface PumpMenuState {
 interface ReassignWindowState {
   slotId: string;
   rowId: string;
+  encoderChannel: number;
   x: number;
   y: number;
 }
@@ -81,6 +76,8 @@ interface PumpViewportPump {
   label: string;
   direction: Direction;
   flowRate: number;
+  rpm: number;
+  encoderChannel: number;
   isActive: boolean;
   x: number;
   y: number;
@@ -132,36 +129,6 @@ function getSlotKey(x: number, y: number, z: number) {
   return `${x.toFixed(3)}:${y.toFixed(3)}:${z.toFixed(3)}`;
 }
 
-function getStoredModelSlots(): PumpModelSlot[] {
-  if (typeof window === "undefined") {
-    return [];
-  }
-
-  try {
-    const storedSlots = window.localStorage.getItem(PUMP_MODEL_LAYOUT_STORAGE_KEY);
-    if (!storedSlots) {
-      return [];
-    }
-
-    const parsed = JSON.parse(storedSlots);
-    if (!Array.isArray(parsed)) {
-      return [];
-    }
-
-    return parsed
-      .map((slot) => ({
-        id: typeof slot.id === "string" ? slot.id : createModelSlotId(),
-        rowId: typeof slot.rowId === "string" ? slot.rowId : "",
-        x: Number(slot.x),
-        y: Number.isFinite(Number(slot.y)) ? Number(slot.y) : 0,
-        z: Number(slot.z),
-      }))
-      .filter((slot) => slot.rowId && Number.isFinite(slot.x) && Number.isFinite(slot.y) && Number.isFinite(slot.z));
-  } catch {
-    return [];
-  }
-}
-
 function usePumpRows() {
   const rows = useSchedulerStore((state) => state.rows);
   return useMemo(
@@ -201,12 +168,11 @@ function usePumpViewportPumps(previewPumpId: string | null, isPreviewRunning: bo
 function usePumpViewportModelPumps(
   modelSlots: PumpModelSlot[],
   pumpRows: Row[],
-  previewPumpId: string | null,
-  isPreviewRunning: boolean,
 ) {
   const blocks = useSchedulerStore((state) => state.blocks);
   const playheadMs = useSchedulerStore((state) => state.playheadMs);
   const experimentState = useSchedulerStore((state) => state.experimentState);
+  const rpmByChannel = useEncoderStore((state) => state.rpmByChannel);
 
   return useMemo(() => {
     const pumpRowsById = new Map(pumpRows.map((row) => [row.id, row]));
@@ -218,36 +184,40 @@ function usePumpViewportModelPumps(
       }
 
       const activeBlock = getActiveBlockForRow(row, blocks, playheadMs, experimentState);
-      const isPreviewActive = isPreviewRunning && previewPumpId === row.id;
+      const rpm = rpmByChannel[slot.encoderChannel] ?? 0;
 
       return [{
         id: row.id,
         slotId: slot.id,
         label: row.name,
-        direction: activeBlock?.direction ?? "forward",
+        direction: Math.abs(rpm) > PUMP_MOTION_RPM_THRESHOLD
+          ? rpm < 0
+            ? "reverse"
+            : "forward"
+          : activeBlock?.direction ?? "forward",
         flowRate: activeBlock?.flowRate ?? 320,
-        isActive: Boolean(activeBlock) || isPreviewActive,
+        rpm,
+        encoderChannel: slot.encoderChannel,
+        isActive: Math.abs(rpm) > PUMP_MOTION_RPM_THRESHOLD,
         x: slot.x,
         y: slot.y,
         z: slot.z,
       }];
     });
-  }, [blocks, experimentState, isPreviewRunning, modelSlots, playheadMs, previewPumpId, pumpRows]);
+  }, [blocks, experimentState, modelSlots, playheadMs, pumpRows, rpmByChannel]);
 }
 
-function PumpHead({ direction, flowRate, isActive }: Pick<PumpViewportPump, "direction" | "flowRate" | "isActive">) {
+function PumpHead({ rpm }: Pick<PumpViewportPump, "rpm">) {
   const gltf = useGLTF(HEAD_MODEL_URL);
   const head = useMemo(() => gltf.scene.clone(true), [gltf.scene]);
   const pivotRef = useRef<THREE.Group>(null);
 
   useFrame((_, delta) => {
-    if (!isActive || !pivotRef.current) {
+    if (!pivotRef.current || Math.abs(rpm) <= PUMP_MOTION_RPM_THRESHOLD) {
       return;
     }
 
-    const directionMultiplier = direction === "reverse" ? -1 : 1;
-    const speed = THREE.MathUtils.clamp(flowRate / 85, 1.2, 7.5);
-    pivotRef.current.rotation.z += delta * speed * directionMultiplier;
+    pivotRef.current.rotation.z += delta * (rpm * Math.PI * 2) / 60;
   });
 
   return (
@@ -318,18 +288,31 @@ function createArrowClone(source: THREE.Object3D, direction: Direction, isActive
 function PumpRotationArrow({
   direction,
   isActive,
-}: Pick<PumpViewportPump, "direction" | "isActive">) {
+  rpm,
+}: Pick<PumpViewportPump, "direction" | "isActive" | "rpm">) {
   const gltf = useGLTF(ARROW_MODEL_URL);
+  const pivotRef = useRef<THREE.Group>(null);
   const arrow = useMemo(
     () => createArrowClone(gltf.scene, direction, isActive),
     [direction, gltf.scene, isActive],
   );
+  const arrowPosition = useMemo(
+    () => ARROW_FRONT_OFFSET.clone().sub(HEAD_CENTER).toArray(),
+    [],
+  );
+
+  useFrame((_, delta) => {
+    if (!pivotRef.current || Math.abs(rpm) <= PUMP_MOTION_RPM_THRESHOLD) {
+      return;
+    }
+
+    pivotRef.current.rotation.z += delta * (rpm * Math.PI * 2) / 60;
+  });
 
   return (
-    <primitive
-      object={arrow}
-      position={BODY_CENTER.clone().multiplyScalar(-1).add(ARROW_FRONT_OFFSET).toArray()}
-    />
+    <group ref={pivotRef} position={HEAD_PIVOT.toArray()}>
+      <primitive object={arrow} position={arrowPosition} />
+    </group>
   );
 }
 
@@ -651,9 +634,13 @@ function PumpModel({
           <PumpBodyOutline body={body} color={outlineColor} isSelected={isSelected} />
         ) : null}
         <primitive object={body} position={BODY_CENTER.clone().multiplyScalar(-1).toArray()} />
-        <PumpHead direction={pump.direction} flowRate={pump.flowRate} isActive={pump.isActive} />
+        <PumpHead rpm={pump.rpm} />
         {pump.isActive ? (
-          <PumpRotationArrow direction={pump.direction} isActive={pump.isActive} />
+          <PumpRotationArrow
+            direction={pump.direction}
+            isActive={pump.isActive}
+            rpm={pump.rpm}
+          />
         ) : null}
       </group>
       {(["left", "right", "up", "down"] as CandidateDirection[]).map((direction) => (
@@ -712,6 +699,8 @@ function PumpScene({
   const controlsRef = useRef<any>(null);
   const hasInitializedViewRef = useRef(false);
   const lastResetViewNonceRef = useRef(resetViewNonce);
+  const sceneCenterRef = useRef(new THREE.Vector3(0, 0.12, 0.35));
+  const fitDistanceRef = useRef(4.7);
   const { camera } = useThree();
   const occupiedSlotKeys = useMemo(
     () => new Set(pumps.map((pump) => getSlotKey(pump.x, pump.y, pump.z))),
@@ -733,7 +722,7 @@ function PumpScene({
   }, [pumps]);
   const fitDistance = useMemo(() => {
     if (pumps.length === 0) {
-      return 5.6;
+      return 4.4;
     }
 
     const minX = Math.min(...pumps.map((pump) => pump.x));
@@ -749,8 +738,12 @@ function PumpScene({
       1,
     );
 
-    return THREE.MathUtils.clamp(5.8 + span * 1.25, 5.8, 14.5);
+    return THREE.MathUtils.clamp(4.7 + span * 0.95, 4.7, 11.5);
   }, [pumps]);
+
+  sceneCenterRef.current = sceneCenter;
+  fitDistanceRef.current = fitDistance;
+
   const isSlotAvailable = useCallback(
     (candidate: CandidatePumpSlot) => !occupiedSlotKeys.has(getSlotKey(candidate.x, candidate.y, candidate.z)),
     [occupiedSlotKeys],
@@ -770,20 +763,22 @@ function PumpScene({
     hasInitializedViewRef.current = true;
     lastResetViewNonceRef.current = resetViewNonce;
     const controls = controlsRef.current;
+    const currentSceneCenter = sceneCenterRef.current;
+    const currentFitDistance = fitDistanceRef.current;
 
     camera.position.set(
-      sceneCenter.x + fitDistance * 0.62,
-      sceneCenter.y + fitDistance * 0.42,
-      sceneCenter.z + fitDistance,
+      currentSceneCenter.x + currentFitDistance * 0.34,
+      currentSceneCenter.y + currentFitDistance * 0.24,
+      currentSceneCenter.z + currentFitDistance * 0.82,
     );
-    camera.lookAt(sceneCenter);
+    camera.lookAt(currentSceneCenter);
 
     if (controls) {
-      controls.target.copy(sceneCenter);
+      controls.target.copy(currentSceneCenter);
       controls.update();
       controls.saveState();
     }
-  }, [camera, fitDistance, resetViewNonce, sceneCenter]);
+  }, [camera, resetViewNonce]);
 
   return (
     <>
@@ -795,7 +790,7 @@ function PumpScene({
       <group rotation={[-0.08, -0.22, 0]}>
         {pumps.map((pump) => (
           <PumpModel
-            key={pump.id}
+            key={pump.slotId}
             isHovered={hoveredPumpId === pump.id}
             isSelected={selectedPumpId === pump.id}
             isShiftPressed={isShiftPressed}
@@ -842,6 +837,146 @@ function LoadingModels() {
   );
 }
 
+function CanvasResizeSync() {
+  const { camera, gl, invalidate, setSize } = useThree();
+
+  useLayoutEffect(() => {
+    const canvas = gl.domElement;
+    const parent = canvas.parentElement;
+
+    if (!parent || typeof ResizeObserver === "undefined") {
+      return;
+    }
+
+    let animationFrame = 0;
+
+    const syncSize = () => {
+      const rect = parent.getBoundingClientRect();
+      const width = Math.max(1, Math.floor(rect.width));
+      const height = Math.max(1, Math.floor(rect.height));
+
+      canvas.style.width = "100%";
+      canvas.style.height = "100%";
+      setSize(width, height);
+
+      if ("aspect" in camera) {
+        camera.aspect = width / height;
+        camera.updateProjectionMatrix();
+      }
+
+      invalidate();
+    };
+
+    const scheduleSync = () => {
+      window.cancelAnimationFrame(animationFrame);
+      animationFrame = window.requestAnimationFrame(syncSize);
+    };
+
+    const observer = new ResizeObserver(scheduleSync);
+    observer.observe(parent);
+    scheduleSync();
+
+    return () => {
+      window.cancelAnimationFrame(animationFrame);
+      observer.disconnect();
+    };
+  }, [camera, gl, invalidate, setSize]);
+
+  return null;
+}
+
+function getSparklineMetrics(values: number[], width: number, height: number) {
+  if (values.length === 0) {
+    return { path: "", zeroY: height / 2 };
+  }
+
+  const rawMinValue = Math.min(...values, 0);
+  const rawMaxValue = Math.max(...values, 0);
+  const rawSpan = Math.max(1, rawMaxValue - rawMinValue);
+  const padding = rawSpan * 0.08;
+  const minValue = rawMinValue - padding;
+  const maxValue = rawMaxValue + padding;
+  const span = maxValue - minValue;
+  const denominator = Math.max(1, values.length - 1);
+  const valueToY = (value: number) => height - ((value - minValue) / span) * height;
+
+  const path = values
+    .map((value, index) => {
+      const x = (index / denominator) * width;
+      const y = valueToY(value);
+      return `${index === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+
+  return { path, zeroY: valueToY(0) };
+}
+
+function PumpTelemetryPanel({ pumps }: { pumps: PumpViewportPump[] }) {
+  const historyByChannel = useEncoderStore((state) => state.historyByChannel);
+
+  if (pumps.length === 0) {
+    return (
+      <div className="min-h-0 overflow-auto border-t border-border/60 px-3 py-3 text-xs text-muted-foreground">
+        Add a pump model to show encoder telemetry.
+      </div>
+    );
+  }
+
+  return (
+    <div className="thin-scrollbar min-h-0 overflow-auto border-t border-border/60 bg-slate-50/80 px-3 py-3">
+      <div className="grid gap-2">
+        {pumps.map((pump) => {
+          const history = historyByChannel[pump.encoderChannel] ?? [];
+          const values = history.map((point) => point.rpm);
+          const { path, zeroY } = getSparklineMetrics(values, 132, 32);
+
+          return (
+            <div
+              key={pump.slotId}
+              className="grid grid-cols-[minmax(0,1fr),auto] items-center gap-3 rounded-md border border-border/60 bg-white px-3 py-2"
+            >
+              <div className="min-w-0">
+                <div className="truncate text-xs font-semibold text-foreground">
+                  {pump.label}
+                </div>
+                <div className="mt-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+                  Encoder {pump.encoderChannel}
+                </div>
+              </div>
+              <div className="flex items-center gap-3">
+                <div className="text-right">
+                  <div className="font-mono text-sm font-semibold text-foreground">
+                    {pump.rpm.toFixed(1)}
+                  </div>
+                  <div className="text-[10px] text-muted-foreground">RPM</div>
+                </div>
+                <svg
+                  className="h-8 w-32 overflow-visible"
+                  viewBox="0 0 132 32"
+                  role="img"
+                  aria-label={`${pump.label} RPM history`}
+                >
+                  <line
+                    x1="0"
+                    x2="132"
+                    y1={zeroY}
+                    y2={zeroY}
+                    stroke="#e2e8f0"
+                    strokeWidth="1"
+                  />
+                  {path ? (
+                    <path d={path} fill="none" stroke="#0891b2" strokeLinecap="round" strokeWidth="2" />
+                  ) : null}
+                </svg>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 interface PumpSetupViewportProps {
   className?: string;
 }
@@ -849,22 +984,23 @@ interface PumpSetupViewportProps {
 export function PumpSetupViewport({ className }: PumpSetupViewportProps) {
   const [hoveredPumpId, setHoveredPumpId] = useState<string | null>(null);
   const [selectedPumpId, setSelectedPumpId] = useState<string | null>(null);
-  const [isPreviewRunning, setIsPreviewRunning] = useState(false);
   const [isShiftPressed, setIsShiftPressed] = useState(false);
   const [activeCandidate, setActiveCandidate] = useState<CandidatePumpSlot | null>(null);
   const [assignmentWindow, setAssignmentWindow] = useState<AssignmentWindowState | null>(null);
   const [reassignWindow, setReassignWindow] = useState<ReassignWindowState | null>(null);
   const [pumpMenu, setPumpMenu] = useState<PumpMenuState | null>(null);
   const [assignmentRowId, setAssignmentRowId] = useState("");
+  const [assignmentEncoderChannel, setAssignmentEncoderChannel] = useState(0);
   const [resetViewNonce, setResetViewNonce] = useState(0);
   const pumpRows = usePumpRows();
-  const [modelSlots, setModelSlots] = useState<PumpModelSlot[]>(getStoredModelSlots);
-  const previewPumpId = selectedPumpId ?? modelSlots[0]?.rowId ?? null;
+  const setModelHighlightedRow = useSchedulerStore((state) => state.setModelHighlightedRow);
+  const scheduleLoadNonce = useSchedulerStore((state) => state.scheduleLoadNonce);
+  const modelSlots = useSchedulerStore((state) => state.pumpModelSlots);
+  const setModelSlots = useSchedulerStore((state) => state.setPumpModelSlots);
+  const deletePumpModelSlot = useSchedulerStore((state) => state.deletePumpModelSlot);
   const pumps = usePumpViewportModelPumps(
     modelSlots,
     pumpRows,
-    previewPumpId,
-    isPreviewRunning,
   );
   const selectedPump = pumps.find((pump) => pump.id === selectedPumpId) ?? pumps[0] ?? null;
   const assignedRowIds = useMemo(
@@ -874,38 +1010,18 @@ export function PumpSetupViewport({ className }: PumpSetupViewportProps) {
   const getDefaultAssignmentRowId = useCallback(() => {
     return pumpRows.find((row) => !assignedRowIds.has(row.id))?.id ?? pumpRows[0]?.id ?? "";
   }, [assignedRowIds, pumpRows]);
-
-  useEffect(() => {
-    const pumpRowIds = new Set(pumpRows.map((row) => row.id));
-
-    setModelSlots((currentSlots) => {
-      const nextSlots = currentSlots.filter((slot) => pumpRowIds.has(slot.rowId));
-
-      if (pumpRows.length === 0) {
-        return [];
-      }
-
-      if (nextSlots.length > 0) {
-        return nextSlots;
-      }
-
-      return [{
-        id: createModelSlotId(),
-        rowId: pumpRows[0].id,
-        x: 0,
-        y: 0,
-        z: 0,
-      }];
-    });
-  }, [pumpRows]);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(PUMP_MODEL_LAYOUT_STORAGE_KEY, JSON.stringify(modelSlots));
-    } catch {
-      // The viewport still works when local storage is unavailable.
-    }
+  const getDefaultEncoderChannel = useCallback(() => {
+    const assignedEncoderChannels = new Set(modelSlots.map((slot) => slot.encoderChannel));
+    return ENCODER_CHANNEL_OPTIONS.find((channel) => !assignedEncoderChannels.has(channel)) ?? 0;
   }, [modelSlots]);
+
+  useEffect(() => {
+    if (scheduleLoadNonce === 0) {
+      return;
+    }
+
+    setResetViewNonce((current) => current + 1);
+  }, [scheduleLoadNonce]);
 
   useEffect(() => {
     const pumpIds = new Set(pumps.map((pump) => pump.id));
@@ -913,6 +1029,14 @@ export function PumpSetupViewport({ className }: PumpSetupViewportProps) {
       setSelectedPumpId(null);
     }
   }, [pumps, selectedPumpId]);
+
+  useEffect(() => {
+    setModelHighlightedRow(selectedPumpId);
+
+    return () => {
+      setModelHighlightedRow(null);
+    };
+  }, [selectedPumpId, setModelHighlightedRow]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -950,8 +1074,9 @@ export function PumpSetupViewport({ className }: PumpSetupViewportProps) {
       setReassignWindow(null);
       setPumpMenu(null);
       setAssignmentRowId(getDefaultAssignmentRowId());
+      setAssignmentEncoderChannel(getDefaultEncoderChannel());
     },
-    [getDefaultAssignmentRowId],
+    [getDefaultAssignmentRowId, getDefaultEncoderChannel],
   );
   const openPumpMenu = useCallback((pump: PumpViewportPump, x: number, y: number) => {
     setPumpMenu({ pumpId: pump.id, slotId: pump.slotId, x, y });
@@ -968,61 +1093,59 @@ export function PumpSetupViewport({ className }: PumpSetupViewportProps) {
     setReassignWindow({
       slotId: pumpMenu.slotId,
       rowId: pumpMenu.pumpId,
+      encoderChannel:
+        modelSlots.find((slot) => slot.id === pumpMenu.slotId)?.encoderChannel ?? 0,
       x: pumpMenu.x,
       y: pumpMenu.y,
     });
     setPumpMenu(null);
-  }, [pumpMenu]);
+  }, [modelSlots, pumpMenu]);
   const reassignPumpModel = useCallback(() => {
     if (!reassignWindow || !reassignWindow.rowId) {
       return;
     }
 
-    setModelSlots((currentSlots) => {
-      const targetSlot = currentSlots.find((slot) => slot.id === reassignWindow.slotId);
+    const targetSlot = modelSlots.find((slot) => slot.id === reassignWindow.slotId);
 
-      if (!targetSlot) {
-        return currentSlots;
+    if (!targetSlot) {
+      return;
+    }
+
+    const occupiedSlot = modelSlots.find(
+      (slot) =>
+        slot.id !== reassignWindow.slotId &&
+        slot.rowId === reassignWindow.rowId,
+    );
+
+    setModelSlots(modelSlots.map((slot) => {
+      if (slot.id === reassignWindow.slotId) {
+        return {
+          ...slot,
+          rowId: reassignWindow.rowId,
+          encoderChannel: reassignWindow.encoderChannel,
+        };
       }
 
-      const occupiedSlot = currentSlots.find(
-        (slot) =>
-          slot.id !== reassignWindow.slotId &&
-          slot.rowId === reassignWindow.rowId,
-      );
+      if (slot.id === occupiedSlot?.id) {
+        return { ...slot, rowId: targetSlot.rowId };
+      }
 
-      return currentSlots.map((slot) => {
-        if (slot.id === reassignWindow.slotId) {
-          return { ...slot, rowId: reassignWindow.rowId };
-        }
-
-        if (slot.id === occupiedSlot?.id) {
-          return { ...slot, rowId: targetSlot.rowId };
-        }
-
-        return slot;
-      });
-    });
+      return slot;
+    }));
     setSelectedPumpId(reassignWindow.rowId);
     setReassignWindow(null);
-  }, [reassignWindow]);
+  }, [modelSlots, reassignWindow, setModelSlots]);
   const deletePumpModel = useCallback(() => {
     if (!pumpMenu) {
       return;
     }
 
-    setModelSlots((currentSlots) => {
-      if (currentSlots.length <= 1) {
-        return currentSlots;
-      }
-
-      return currentSlots.filter((slot) => slot.id !== pumpMenu.slotId);
-    });
+    deletePumpModelSlot(pumpMenu.slotId);
     if (selectedPumpId === pumpMenu.pumpId) {
       setSelectedPumpId(null);
     }
     setPumpMenu(null);
-  }, [pumpMenu, selectedPumpId]);
+  }, [deletePumpModelSlot, pumpMenu, selectedPumpId]);
 
   const assignCandidateSlot = useCallback(() => {
     if (!assignmentWindow || !assignmentRowId) {
@@ -1032,13 +1155,14 @@ export function PumpSetupViewport({ className }: PumpSetupViewportProps) {
     const { candidate } = assignmentWindow;
     const candidateKey = getSlotKey(candidate.x, candidate.y, candidate.z);
 
-    setModelSlots((currentSlots) => [
-      ...currentSlots.filter(
+    setModelSlots([
+      ...modelSlots.filter(
         (slot) => slot.rowId !== assignmentRowId && getSlotKey(slot.x, slot.y, slot.z) !== candidateKey,
       ),
       {
         id: createModelSlotId(),
         rowId: assignmentRowId,
+        encoderChannel: assignmentEncoderChannel,
         x: candidate.x,
         y: candidate.y,
         z: candidate.z,
@@ -1047,29 +1171,33 @@ export function PumpSetupViewport({ className }: PumpSetupViewportProps) {
     setSelectedPumpId(assignmentRowId);
     setAssignmentWindow(null);
     setActiveCandidate(null);
-  }, [assignmentRowId, assignmentWindow]);
+  }, [assignmentEncoderChannel, assignmentRowId, assignmentWindow, modelSlots, setModelSlots]);
   const canDeletePumpModel = modelSlots.length > 1;
 
   return (
     <div
       className={cn(
-        "flex h-full min-h-[220px] flex-col overflow-hidden rounded-lg border border-border/70 bg-white",
+        "grid h-full min-h-[220px] min-w-0 grid-rows-[56px_320px_minmax(0,1fr)] overflow-hidden rounded-lg border border-border/70 bg-white",
         className,
       )}
     >
-      <div className="flex items-center justify-between gap-3 border-b border-border/60 px-3 py-2">
+      <div className="flex min-h-0 items-center justify-between gap-3 border-b border-border/60 px-3 py-2">
         <div className="min-w-0">
           <div className="truncate text-sm font-semibold text-foreground">
             {selectedPump?.label ?? "Pump Setup"}
           </div>
-          <div className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground">
+          <div className="mt-0.5 flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
             <span
               className={cn(
                 "h-2 w-2 rounded-full",
                 selectedPump?.isActive ? "bg-teal-500 shadow-[0_0_0_3px_rgba(20,184,166,0.16)]" : "bg-slate-300",
               )}
             />
-            {selectedPump?.isActive ? "Running" : "Idle"}
+            <span className="truncate">
+              {selectedPump
+                ? `Encoder ${selectedPump.encoderChannel} - ${selectedPump.rpm.toFixed(1)} RPM`
+                : "No model selected"}
+            </span>
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1">
@@ -1082,16 +1210,6 @@ export function PumpSetupViewport({ className }: PumpSetupViewportProps) {
             onClick={() => setResetViewNonce((current) => current + 1)}
           >
             <Crosshair className="h-4 w-4" />
-          </Button>
-          <Button
-            aria-label={isPreviewRunning ? "Pause preview rotation" : "Preview selected pump rotation"}
-            className="h-8 w-8 px-0"
-            size="sm"
-            title={isPreviewRunning ? "Pause preview rotation" : "Preview selected pump rotation"}
-            variant={isPreviewRunning ? "secondary" : "ghost"}
-            onClick={() => setIsPreviewRunning((current) => !current)}
-          >
-            {isPreviewRunning ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
           </Button>
           <Button
             aria-label="Clear selected pump"
@@ -1107,9 +1225,10 @@ export function PumpSetupViewport({ className }: PumpSetupViewportProps) {
         </div>
       </div>
 
-      <div className="relative min-h-0 flex-1">
+      <div className="relative min-h-0 min-w-0 overflow-hidden">
         <Canvas
           camera={{ fov: 34, position: [5.2, 3.1, 7.4] }}
+          className="h-full w-full min-w-0"
           shadows
           onPointerMissed={(event) => {
             if (event.type !== "click") {
@@ -1123,6 +1242,7 @@ export function PumpSetupViewport({ className }: PumpSetupViewportProps) {
             setPumpMenu(null);
           }}
         >
+          <CanvasResizeSync />
           <Suspense fallback={<LoadingModels />}>
             <PumpScene
               activeCandidate={activeCandidate}
@@ -1147,6 +1267,8 @@ export function PumpSetupViewport({ className }: PumpSetupViewportProps) {
         </div>
       </div>
 
+      <PumpTelemetryPanel pumps={pumps} />
+
       {assignmentWindow ? (
         <FloatingWindow
           title="Assign Pump Model"
@@ -1166,20 +1288,32 @@ export function PumpSetupViewport({ className }: PumpSetupViewportProps) {
             </div>
           }
         >
-          <Select
-            value={assignmentRowId}
-            onChange={(event) => setAssignmentRowId(event.target.value)}
-          >
-            <option value="" disabled>
-              Select pump channel
-            </option>
-            {pumpRows.map((row) => (
-              <option key={row.id} value={row.id}>
-                {row.name}
-                {assignedRowIds.has(row.id) ? " (shown)" : ""}
+          <div className="space-y-3">
+            <Select
+              value={assignmentRowId}
+              onChange={(event) => setAssignmentRowId(event.target.value)}
+            >
+              <option value="" disabled>
+                Select pump channel
               </option>
-            ))}
-          </Select>
+              {pumpRows.map((row) => (
+                <option key={row.id} value={row.id}>
+                  {row.name}
+                  {assignedRowIds.has(row.id) ? " (shown)" : ""}
+                </option>
+              ))}
+            </Select>
+            <Select
+              value={String(assignmentEncoderChannel)}
+              onChange={(event) => setAssignmentEncoderChannel(Number(event.target.value))}
+            >
+              {ENCODER_CHANNEL_OPTIONS.map((channel) => (
+                <option key={channel} value={channel}>
+                  Encoder channel {channel}
+                </option>
+              ))}
+            </Select>
+          </div>
         </FloatingWindow>
       ) : null}
 
@@ -1202,24 +1336,42 @@ export function PumpSetupViewport({ className }: PumpSetupViewportProps) {
             </div>
           }
         >
-          <Select
-            value={reassignWindow.rowId}
-            onChange={(event) =>
-              setReassignWindow((current) =>
-                current ? { ...current, rowId: event.target.value } : current,
-              )
-            }
-          >
-            <option value="" disabled>
-              Select pump channel
-            </option>
-            {pumpRows.map((row) => (
-              <option key={row.id} value={row.id}>
-                {row.name}
-                {assignedRowIds.has(row.id) && row.id !== reassignWindow.rowId ? " (shown)" : ""}
+          <div className="space-y-3">
+            <Select
+              value={reassignWindow.rowId}
+              onChange={(event) =>
+                setReassignWindow((current) =>
+                  current ? { ...current, rowId: event.target.value } : current,
+                )
+              }
+            >
+              <option value="" disabled>
+                Select pump channel
               </option>
-            ))}
-          </Select>
+              {pumpRows.map((row) => (
+                <option key={row.id} value={row.id}>
+                  {row.name}
+                  {assignedRowIds.has(row.id) && row.id !== reassignWindow.rowId ? " (shown)" : ""}
+                </option>
+              ))}
+            </Select>
+            <Select
+              value={String(reassignWindow.encoderChannel)}
+              onChange={(event) =>
+                setReassignWindow((current) =>
+                  current
+                    ? { ...current, encoderChannel: Number(event.target.value) }
+                    : current,
+                )
+              }
+            >
+              {ENCODER_CHANNEL_OPTIONS.map((channel) => (
+                <option key={channel} value={channel}>
+                  Encoder channel {channel}
+                </option>
+              ))}
+            </Select>
+          </div>
         </FloatingWindow>
       ) : null}
 
@@ -1240,7 +1392,7 @@ export function PumpSetupViewport({ className }: PumpSetupViewportProps) {
               onClick={openReassignWindow}
             >
               <RefreshCw className="h-4 w-4" />
-              Reassign Pump
+              Reassign Pump / Encoder
             </Button>
             <Button
               className="w-full justify-start"

@@ -577,7 +577,14 @@ export function PumpCalibrationPanel() {
                 </Select>
               </div>
 
-              <div className={cn("grid gap-3", !isFixedRatePump && "sm:grid-cols-2")}>
+              <div
+                className="grid gap-3"
+                style={{
+                  gridTemplateColumns: isFixedRatePump
+                    ? "minmax(0, 1fr)"
+                    : "repeat(auto-fit, minmax(150px, 1fr))",
+                }}
+              >
                 <div className="space-y-2">
                   <Label htmlFor="calibration-duration">Duration</Label>
                   <div className="relative">
@@ -623,8 +630,13 @@ export function PumpCalibrationPanel() {
                 ) : null}
               </div>
 
-              <div className="grid gap-4 sm:grid-cols-2 2xl:grid-cols-[minmax(160px,0.85fr),minmax(150px,0.8fr),minmax(190px,1fr),minmax(190px,1fr)]">
-                <div className="min-w-0 space-y-2 sm:col-span-2 2xl:col-span-1">
+              <div
+                className="grid items-end gap-3"
+                style={{
+                  gridTemplateColumns: "repeat(auto-fit, minmax(132px, max-content))",
+                }}
+              >
+                <div className="min-w-0 space-y-2">
                   <Label htmlFor="calibration-direction">Direction</Label>
                   <Select
                     id="calibration-direction"
@@ -640,7 +652,7 @@ export function PumpCalibrationPanel() {
                 </div>
 
                 <Button
-                  className="w-full self-end"
+                  className="h-10 w-full min-w-[132px] max-w-[180px] px-3"
                   disabled={!canRunCalibration}
                   title={
                     isMainScheduleRunning
@@ -657,7 +669,7 @@ export function PumpCalibrationPanel() {
                 </Button>
 
                 <Button
-                  className="w-full self-end"
+                  className="h-10 w-full min-w-[132px] max-w-[180px] px-3"
                   disabled={!canRunCalibration}
                   title={
                     isMainScheduleRunning
@@ -674,7 +686,7 @@ export function PumpCalibrationPanel() {
                   {isMainScheduleRunning ? "Locked" : isBoardBusy ? "Running" : "Run Calibration"}
                 </Button>
                 <Button
-                  className="w-full self-end"
+                  className="h-10 w-full min-w-[132px] max-w-[180px] px-3"
                   disabled={!canStopCalibration}
                   title={
                     isCalibrationRunning
@@ -726,23 +738,23 @@ export function PumpCalibrationPanel() {
                 </div>
 
                 <div className="mt-4 overflow-hidden rounded-lg border border-border/60">
-                  <div className="grid grid-cols-[52px,minmax(96px,0.9fr),minmax(124px,1.1fr)] bg-slate-50/90 px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                  <div className="grid grid-cols-[40px,minmax(72px,0.9fr),minmax(96px,1.1fr)] bg-slate-50/90 px-2 py-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
                     <div>Point</div>
                     <div>Duration</div>
-                    <div>Measured Volume</div>
+                    <div>Volume</div>
                   </div>
                   <div className="divide-y divide-border/60">
                     {fixedPoints.map((point, index) => (
                       <div
                         key={point.id}
-                        className="grid grid-cols-[52px,minmax(96px,0.9fr),minmax(124px,1.1fr)] items-center gap-2 px-3 py-2"
+                        className="grid grid-cols-[40px,minmax(72px,0.9fr),minmax(96px,1.1fr)] items-center gap-1.5 px-2 py-2"
                       >
                         <div className="text-xs font-semibold text-muted-foreground">
                           {index + 1}
                         </div>
                         <div className="relative">
                           <DraftNumberInput
-                            className="h-8 pr-8 text-xs"
+                            className="h-8 px-2 pr-7 text-xs"
                             min={0.5}
                             minValue={0.5}
                             step={0.5}
@@ -758,7 +770,7 @@ export function PumpCalibrationPanel() {
                         </div>
                         <div className="relative">
                           <NullableDraftNumberInput
-                            className="h-8 pr-10 text-xs"
+                            className="h-8 px-2 pr-8 text-xs"
                             min={0}
                             minValue={0}
                             step={1}
@@ -779,7 +791,7 @@ export function PumpCalibrationPanel() {
               </>
             ) : (
               <>
-                <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                <div className="mt-3 grid gap-3 xl:grid-cols-2">
                   <div className="space-y-2">
                     <Label htmlFor="calibration-vmax">V_MAX</Label>
                     <div className="relative">
@@ -816,23 +828,23 @@ export function PumpCalibrationPanel() {
                 </div>
 
                 <div className="mt-4 overflow-hidden rounded-lg border border-border/60">
-                  <div className="grid grid-cols-[52px,minmax(108px,0.95fr),minmax(120px,1.05fr)] bg-slate-50/90 px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                  <div className="grid grid-cols-[40px,minmax(76px,0.95fr),minmax(96px,1.05fr)] bg-slate-50/90 px-2 py-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
                     <div>Point</div>
                     <div>Voltage</div>
-                    <div>Measured Flow</div>
+                    <div>Flow</div>
                   </div>
                   <div className="divide-y divide-border/60">
                     {points.map((point, index) => (
                       <div
                         key={point.id}
-                        className="grid grid-cols-[52px,minmax(108px,0.95fr),minmax(120px,1.05fr)] items-center gap-2 px-3 py-2"
+                        className="grid grid-cols-[40px,minmax(76px,0.95fr),minmax(96px,1.05fr)] items-center gap-1.5 px-2 py-2"
                       >
                         <div className="text-xs font-semibold text-muted-foreground">
                           {index + 1}
                         </div>
                         <div className="relative">
                           <DraftNumberInput
-                            className="h-8 pr-10 text-xs"
+                            className="h-8 px-2 pr-8 text-xs"
                             max={vMax}
                             maxValue={vMax}
                             min={MIN_CALIBRATION_VOLTAGE}
@@ -848,7 +860,7 @@ export function PumpCalibrationPanel() {
                         </div>
                         <div className="relative">
                           <NullableDraftNumberInput
-                            className="h-8 pr-16 text-xs"
+                            className="h-8 px-2 pr-12 text-xs"
                             min={0}
                             minValue={0}
                             step={1}

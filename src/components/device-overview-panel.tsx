@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Cpu, ListChecks, PanelsTopLeft, Terminal, X } from "lucide-react";
+import { Activity, Cpu, ListChecks, PanelsTopLeft, Terminal, X } from "lucide-react";
 import backplaneImage from "@/assets/backplane.png";
 import pumpCardImage from "@/assets/pump-control-card.png";
 import timingCardImage from "@/assets/timing-card.png";
@@ -13,12 +13,14 @@ import {
   getFirmwareScheduleSummary,
 } from "@/lib/firmware-constraints";
 import { detectBackplane } from "@/lib/board-api";
+import { startEncoderMonitor, stopEncoderMonitor } from "@/lib/encoder-api";
 import { cn } from "@/lib/utils";
 import {
   useBoardStore,
   type DeviceSlotInfo,
   type SlotCardType,
 } from "@/store/board-store";
+import { useEncoderStore } from "@/store/encoder-store";
 import { useSchedulerStore } from "@/store/scheduler-store";
 
 interface SlotDetection extends DeviceSlotInfo {
@@ -186,7 +188,7 @@ function DeviceDetectionControls({
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-muted-foreground">
-            Device Link
+            Instrument Control Unit
           </div>
           <div className="mt-1 text-sm font-medium text-foreground">
             USB CDC
@@ -253,6 +255,147 @@ function DeviceDetectionControls({
           )}
         >
           {detectionMessage}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function EncoderMonitorControls() {
+  const encoderPort = useEncoderStore((state) => state.encoderPort);
+  const connectionState = useEncoderStore((state) => state.connectionState);
+  const message = useEncoderStore((state) => state.message);
+  const latestSample = useEncoderStore((state) => state.latestSample);
+  const latestStatus = useEncoderStore((state) => state.latestStatus);
+  const rpmByChannel = useEncoderStore((state) => state.rpmByChannel);
+  const setEncoderPort = useEncoderStore((state) => state.setEncoderPort);
+  const setConnectionState = useEncoderStore((state) => state.setConnectionState);
+  const resetTelemetry = useEncoderStore((state) => state.resetTelemetry);
+  const isConnected = connectionState === "connected";
+  const isConnecting = connectionState === "connecting";
+  const hasValidFrames = (latestStatus?.framesReceived ?? 0) > 0;
+  const statusLabel =
+    connectionState === "connected"
+      ? hasValidFrames
+        ? "Streaming"
+        : "Connected"
+      : connectionState === "connecting"
+        ? "Connecting"
+        : connectionState === "error"
+          ? "Error"
+          : "Disconnected";
+
+  const connectEncoder = useCallback(async () => {
+    const trimmedPort = encoderPort.trim();
+    setConnectionState("connecting", `Opening ${trimmedPort || "COM port"}...`);
+
+    try {
+      const result = await startEncoderMonitor(trimmedPort);
+      if (result.ok) {
+        resetTelemetry();
+        setConnectionState("connected", result.message);
+      } else {
+        setConnectionState("error", result.message);
+      }
+    } catch (error) {
+      setConnectionState("error", error instanceof Error ? error.message : String(error));
+    }
+  }, [encoderPort, resetTelemetry, setConnectionState]);
+
+  const disconnectEncoder = useCallback(async () => {
+    try {
+      const result = await stopEncoderMonitor();
+      setConnectionState("idle", result.message);
+      resetTelemetry();
+    } catch (error) {
+      setConnectionState("error", error instanceof Error ? error.message : String(error));
+    }
+  }, [resetTelemetry, setConnectionState]);
+
+  return (
+    <section className="rounded-lg border border-border/60 bg-white/72 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-muted-foreground">
+            Encoder Monitor
+          </div>
+          <div className="mt-1 text-sm font-medium text-foreground">
+            Pump RPM Telemetry
+          </div>
+        </div>
+        <Badge
+          className={
+            isConnected
+              ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+              : connectionState === "error"
+                ? "border-rose-200 bg-rose-50 text-rose-700"
+                : "border-slate-200 bg-slate-50 text-slate-600"
+          }
+        >
+          {statusLabel}
+        </Badge>
+      </div>
+
+      <div className="mt-3 grid gap-2 sm:grid-cols-[minmax(0,1fr),auto]">
+        <div className="space-y-1.5">
+          <Label htmlFor="encoder-com-port">COM Port</Label>
+          <Input
+            id="encoder-com-port"
+            value={encoderPort}
+            placeholder="COM8"
+            onChange={(event) => setEncoderPort(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !isConnecting) {
+                void connectEncoder();
+              }
+            }}
+          />
+        </div>
+        <div className="self-end">
+          <Button
+            disabled={isConnecting}
+            variant={isConnected ? "outline" : "default"}
+            onClick={isConnected ? disconnectEncoder : connectEncoder}
+          >
+            {isConnected ? "Disconnect" : isConnecting ? "Connecting" : "Connect"}
+          </Button>
+        </div>
+      </div>
+
+      {message ? (
+        <div
+          className={cn(
+            "mt-3 rounded-lg border px-3 py-2 text-xs",
+            connectionState === "error"
+              ? "border-rose-200 bg-rose-50 text-rose-700"
+              : isConnected
+                ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                : "border-slate-200 bg-slate-50 text-slate-600",
+          )}
+        >
+          {message}
+        </div>
+      ) : null}
+
+      {latestSample ? (
+        <div className="mt-3 rounded-lg border border-border/60 bg-slate-50/80 p-3">
+          <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.22em] text-muted-foreground">
+            <Activity className="h-4 w-4 text-cyan-600" />
+            Live RPM
+          </div>
+          <div className="mt-2 grid grid-cols-4 gap-1.5">
+            {rpmByChannel.map((rpm, channel) => (
+              <div
+                key={channel}
+                className="rounded-md border border-white/80 bg-white px-2 py-1 text-xs"
+              >
+                <div className="text-[9px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                  Ch {channel}
+                </div>
+                <div className="font-mono text-sm text-foreground">{rpm.toFixed(1)}</div>
+              </div>
+            ))}
+          </div>
         </div>
       ) : null}
     </section>
@@ -561,6 +704,8 @@ export function DeviceOverviewPanel() {
             }}
             onDetect={detectDevice}
           />
+
+          <EncoderMonitorControls />
 
           <SlotDetectionWindow isDeviceDetected={isDeviceDetected} slots={slots} />
 

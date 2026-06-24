@@ -10,8 +10,8 @@ const PumpSetupViewport = lazy(() =>
 
 export function PumpSetupPanel() {
   return (
-    <Card className="glass-panel h-full min-h-0 overflow-hidden border-border/70">
-      <CardContent className="flex h-full min-h-0 flex-col gap-4 p-5">
+    <Card className="glass-panel h-full min-h-0 min-w-0 overflow-hidden border-border/70">
+      <CardContent className="flex h-full min-h-0 min-w-0 flex-col gap-4 p-5">
         <div className="flex min-w-0 items-center gap-2">
           <Box className="h-4 w-4 shrink-0 text-sky-600" />
           <div className="min-w-0">
@@ -26,12 +26,12 @@ export function PumpSetupPanel() {
 
         <Suspense
           fallback={
-            <div className="flex min-h-0 flex-1 items-center justify-center rounded-lg border border-border/70 bg-slate-50 text-sm font-medium text-muted-foreground">
+            <div className="flex min-h-0 min-w-0 flex-1 items-center justify-center rounded-lg border border-border/70 bg-slate-50 text-sm font-medium text-muted-foreground">
               Loading 3D setup
             </div>
           }
         >
-          <PumpSetupViewport className="min-h-0 flex-1" />
+          <PumpSetupViewport className="min-h-0 min-w-0 flex-1" />
         </Suspense>
       </CardContent>
     </Card>

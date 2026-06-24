@@ -155,7 +155,7 @@ export function ScheduleBlock({
     <div
       data-block-root="true"
       className={cn(
-        "absolute top-1.5 z-20 flex h-[52px] min-w-0 touch-none select-none flex-col justify-between overflow-visible rounded-xl border text-left shadow-[0_14px_28px_-22px_rgba(15,23,42,0.28)] transition-colors",
+        "absolute top-1.5 z-20 flex h-[52px] min-w-0 touch-none select-none flex-col justify-between overflow-visible rounded-xl border text-left shadow-[0_14px_28px_-22px_rgba(15,23,42,0.28)] outline-none transition-colors focus:outline-none focus-visible:outline-none focus-visible:ring-0",
         showHeader ? "cursor-grab px-3 py-2 active:cursor-grabbing" : "cursor-grab p-0 active:cursor-grabbing",
         isTrigger
           ? isAlternateShade

@@ -1,7 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use tauri::{AppHandle, Manager, Runtime};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,6 +42,15 @@ struct BoardStatus {
     current_time_us: u64,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PrepareStatus {
+    prepared: bool,
+    ready: bool,
+    legacy_start_pending: bool,
+    remaining_delay_ms: u32,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DeviceDetectionResult {
@@ -56,6 +69,57 @@ struct BoardCommandResult {
     status: Option<BoardStatus>,
     log: Vec<SerialLogEntry>,
 }
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EncoderMonitorSample {
+    port_name: String,
+    seq: u8,
+    raw_rpm: [i16; 8],
+    rpm: [f32; 8],
+    received_at_ms: u64,
+    missed_frames: u32,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EncoderMonitorStatus {
+    port_name: String,
+    bytes_received: u64,
+    frames_received: u64,
+    crc_errors: u64,
+    discarded_bytes: u64,
+    buffered_bytes: usize,
+    last_seq: Option<u8>,
+    last_frame_at_ms: Option<u64>,
+    message: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EncoderMonitorSnapshot {
+    connected: bool,
+    port_name: String,
+    sample: Option<EncoderMonitorSample>,
+    status: Option<EncoderMonitorStatus>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EncoderMonitorResult {
+    ok: bool,
+    port_name: String,
+    message: String,
+}
+
+struct EncoderMonitorHandle {
+    port_name: String,
+    stop: Arc<AtomicBool>,
+    join: thread::JoinHandle<()>,
+}
+
+static ENCODER_MONITOR: OnceLock<Mutex<Option<EncoderMonitorHandle>>> = OnceLock::new();
+static ENCODER_MONITOR_SNAPSHOT: OnceLock<Mutex<EncoderMonitorSnapshot>> = OnceLock::new();
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -154,10 +218,29 @@ fn upload_schedule(
         Ok(report) => BoardCommandResult {
             ok: true,
             message: format!(
-                "Uploaded {} event(s) in {} attempt(s). Board status: {}.",
-                report.event_count, report.attempts, report.status.state
+                "Uploaded {} event(s) in {} attempt(s). Pump preload is ready to begin.",
+                report.event_count, report.attempts
             ),
             status: Some(report.status),
+            log: output.log,
+        },
+        Err(error) => command_error(error, output.log),
+    }
+}
+
+#[tauri::command]
+fn prepare_schedule(port_name: String) -> BoardCommandResult {
+    let trimmed_port = match require_port_name(&port_name) {
+        Ok(trimmed_port) => trimmed_port,
+        Err(message) => return command_error(message, Vec::new()),
+    };
+
+    let output = protocol::prepare_schedule(&trimmed_port);
+    match output.result {
+        Ok(status) => BoardCommandResult {
+            ok: true,
+            message: "Preloaded pump speeds and prepared start. Start is ready.".to_string(),
+            status: Some(status),
             log: output.log,
         },
         Err(error) => command_error(error, output.log),
@@ -219,6 +302,95 @@ fn stop_schedule(port_name: String) -> BoardCommandResult {
         },
         Err(error) => command_error(error, output.log),
     }
+}
+
+#[tauri::command]
+fn start_encoder_monitor<R: Runtime>(app: AppHandle<R>, port_name: String) -> EncoderMonitorResult {
+    let trimmed_port = match require_port_name(&port_name) {
+        Ok(trimmed_port) => trimmed_port,
+        Err(message) => {
+            return EncoderMonitorResult {
+                ok: false,
+                port_name: String::new(),
+                message,
+            }
+        }
+    };
+
+    stop_current_encoder_monitor();
+
+    let serial = match protocol::serial::SerialConnection::open(&trimmed_port) {
+        Ok(serial) => serial,
+        Err(error) => {
+            return EncoderMonitorResult {
+                ok: false,
+                port_name: trimmed_port,
+                message: format!("Could not open encoder monitor: {error}"),
+            }
+        }
+    };
+
+    publish_encoder_snapshot(EncoderMonitorSnapshot {
+        connected: true,
+        port_name: trimmed_port.clone(),
+        sample: None,
+        status: Some(EncoderMonitorStatus {
+            port_name: trimmed_port.clone(),
+            bytes_received: 0,
+            frames_received: 0,
+            crc_errors: 0,
+            discarded_bytes: 0,
+            buffered_bytes: 0,
+            last_seq: None,
+            last_frame_at_ms: None,
+            message: format!("Connected to {trimmed_port}; waiting for encoder telemetry."),
+        }),
+    });
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+    let thread_port = trimmed_port.clone();
+    let thread_app = app.clone();
+
+    let join = thread::spawn(move || {
+        run_encoder_monitor(thread_app, thread_port, serial, thread_stop);
+    });
+
+    let mut monitor = encoder_monitor_state()
+        .lock()
+        .expect("encoder monitor mutex poisoned");
+    *monitor = Some(EncoderMonitorHandle {
+        port_name: trimmed_port.clone(),
+        stop,
+        join,
+    });
+
+    EncoderMonitorResult {
+        ok: true,
+        port_name: trimmed_port.clone(),
+        message: format!("Encoder Monitor connected on {trimmed_port}."),
+    }
+}
+
+#[tauri::command]
+fn stop_encoder_monitor() -> EncoderMonitorResult {
+    let stopped_port = stop_current_encoder_monitor();
+
+    EncoderMonitorResult {
+        ok: true,
+        port_name: stopped_port.clone().unwrap_or_default(),
+        message: stopped_port
+            .map(|port_name| format!("Encoder Monitor disconnected from {port_name}."))
+            .unwrap_or_else(|| "Encoder Monitor is not connected.".to_string()),
+    }
+}
+
+#[tauri::command]
+fn get_encoder_monitor_snapshot() -> EncoderMonitorSnapshot {
+    encoder_monitor_snapshot_state()
+        .lock()
+        .expect("encoder monitor snapshot mutex poisoned")
+        .clone()
 }
 
 #[tauri::command]
@@ -308,6 +480,324 @@ fn command_error(message: impl Into<String>, log: Vec<SerialLogEntry>) -> BoardC
     }
 }
 
+fn encoder_monitor_state() -> &'static Mutex<Option<EncoderMonitorHandle>> {
+    ENCODER_MONITOR.get_or_init(|| Mutex::new(None))
+}
+
+fn encoder_monitor_snapshot_state() -> &'static Mutex<EncoderMonitorSnapshot> {
+    ENCODER_MONITOR_SNAPSHOT.get_or_init(|| {
+        Mutex::new(EncoderMonitorSnapshot {
+            connected: false,
+            port_name: String::new(),
+            sample: None,
+            status: None,
+        })
+    })
+}
+
+fn publish_encoder_snapshot(snapshot: EncoderMonitorSnapshot) {
+    let mut state = encoder_monitor_snapshot_state()
+        .lock()
+        .expect("encoder monitor snapshot mutex poisoned");
+    *state = snapshot;
+}
+
+fn publish_encoder_status(status: EncoderMonitorStatus) {
+    let mut state = encoder_monitor_snapshot_state()
+        .lock()
+        .expect("encoder monitor snapshot mutex poisoned");
+    state.connected = true;
+    state.port_name = status.port_name.clone();
+    state.status = Some(status);
+}
+
+fn publish_encoder_sample(sample: EncoderMonitorSample) {
+    let mut state = encoder_monitor_snapshot_state()
+        .lock()
+        .expect("encoder monitor snapshot mutex poisoned");
+    state.connected = true;
+    state.port_name = sample.port_name.clone();
+    state.sample = Some(sample);
+}
+
+fn stop_current_encoder_monitor() -> Option<String> {
+    let handle = {
+        let mut monitor = encoder_monitor_state()
+            .lock()
+            .expect("encoder monitor mutex poisoned");
+
+        monitor.take()
+    }?;
+
+    handle.stop.store(true, Ordering::Relaxed);
+    let port_name = handle.port_name;
+    let _ = handle.join.join();
+
+    publish_encoder_snapshot(EncoderMonitorSnapshot {
+        connected: false,
+        port_name: port_name.clone(),
+        sample: None,
+        status: Some(EncoderMonitorStatus {
+            port_name: port_name.clone(),
+            bytes_received: 0,
+            frames_received: 0,
+            crc_errors: 0,
+            discarded_bytes: 0,
+            buffered_bytes: 0,
+            last_seq: None,
+            last_frame_at_ms: None,
+            message: format!("Encoder Monitor disconnected from {port_name}."),
+        }),
+    });
+
+    Some(port_name)
+}
+
+fn run_encoder_monitor<R: Runtime>(
+    app: AppHandle<R>,
+    port_name: String,
+    mut serial: protocol::serial::SerialConnection,
+    stop: Arc<AtomicBool>,
+) {
+    let mut read_buffer = [0u8; 128];
+    let mut frame_buffer: Vec<u8> = Vec::with_capacity(256);
+    let mut previous_seq: Option<u8> = None;
+    let mut bytes_received = 0u64;
+    let mut frames_received = 0u64;
+    let mut crc_errors = 0u64;
+    let mut discarded_bytes = 0u64;
+    let mut last_frame_at_ms: Option<u64> = None;
+    let mut last_status_emit_ms = 0u64;
+
+    while !stop.load(Ordering::Relaxed) {
+        match serial.read(&mut read_buffer) {
+            Ok(0) => {
+                let now_ms = now_unix_ms();
+                emit_encoder_status_if_due(
+                    &app,
+                    &port_name,
+                    bytes_received,
+                    frames_received,
+                    crc_errors,
+                    discarded_bytes,
+                    frame_buffer.len(),
+                    previous_seq,
+                    last_frame_at_ms,
+                    &mut last_status_emit_ms,
+                    now_ms,
+                );
+                thread::sleep(Duration::from_millis(2));
+            }
+            Ok(byte_count) => {
+                bytes_received += byte_count as u64;
+                frame_buffer.extend_from_slice(&read_buffer[..byte_count]);
+                let parse_result = parse_encoder_frames(&mut frame_buffer);
+                crc_errors += parse_result.crc_errors as u64;
+                discarded_bytes += parse_result.discarded_bytes as u64;
+
+                for (seq, raw_rpm) in parse_result.frames {
+                    let missed_frames = previous_seq
+                        .map(|previous| {
+                            let expected = previous.wrapping_add(1);
+                            if seq == expected {
+                                0
+                            } else {
+                                seq.wrapping_sub(expected) as u32
+                            }
+                        })
+                        .unwrap_or(0);
+                    previous_seq = Some(seq);
+                    frames_received += 1;
+
+                    let rpm = raw_rpm.map(|value| value as f32 / 10.0);
+                    let received_at_ms = now_unix_ms();
+                    last_frame_at_ms = Some(received_at_ms);
+                    let sample = EncoderMonitorSample {
+                        port_name: port_name.clone(),
+                        seq,
+                        raw_rpm,
+                        rpm,
+                        received_at_ms,
+                        missed_frames,
+                    };
+                    publish_encoder_sample(sample.clone());
+                    let _ = app.emit(ENCODER_MONITOR_SAMPLE_EVENT, sample);
+                }
+
+                let now_ms = now_unix_ms();
+                emit_encoder_status_if_due(
+                    &app,
+                    &port_name,
+                    bytes_received,
+                    frames_received,
+                    crc_errors,
+                    discarded_bytes,
+                    frame_buffer.len(),
+                    previous_seq,
+                    last_frame_at_ms,
+                    &mut last_status_emit_ms,
+                    now_ms,
+                );
+            }
+            Err(error) => {
+                let status = EncoderMonitorStatus {
+                    port_name: port_name.clone(),
+                    bytes_received,
+                    frames_received,
+                    crc_errors,
+                    discarded_bytes,
+                    buffered_bytes: frame_buffer.len(),
+                    last_seq: previous_seq,
+                    last_frame_at_ms,
+                    message: format!("Read error: {error}"),
+                };
+                publish_encoder_status(status.clone());
+                let _ = app.emit(ENCODER_MONITOR_STATUS_EVENT, status);
+                thread::sleep(Duration::from_millis(8));
+            }
+        }
+    }
+}
+
+const ENCODER_MONITOR_SAMPLE_EVENT: &str = "encoder-monitor-sample";
+const ENCODER_MONITOR_STATUS_EVENT: &str = "encoder-monitor-status";
+
+struct EncoderParseResult {
+    frames: Vec<(u8, [i16; 8])>,
+    crc_errors: usize,
+    discarded_bytes: usize,
+}
+
+fn emit_encoder_status_if_due<R: Runtime>(
+    app: &AppHandle<R>,
+    port_name: &str,
+    bytes_received: u64,
+    frames_received: u64,
+    crc_errors: u64,
+    discarded_bytes: u64,
+    buffered_bytes: usize,
+    last_seq: Option<u8>,
+    last_frame_at_ms: Option<u64>,
+    last_status_emit_ms: &mut u64,
+    now_ms: u64,
+) {
+    if now_ms.saturating_sub(*last_status_emit_ms) < 250 {
+        return;
+    }
+
+    *last_status_emit_ms = now_ms;
+    let message = if frames_received > 0 {
+        format!("Receiving encoder telemetry on {port_name}.")
+    } else if bytes_received > 0 {
+        format!("Receiving bytes on {port_name}, waiting for valid frames.")
+    } else {
+        format!("Connected to {port_name}; waiting for encoder telemetry.")
+    };
+
+    let status = EncoderMonitorStatus {
+        port_name: port_name.to_string(),
+        bytes_received,
+        frames_received,
+        crc_errors,
+        discarded_bytes,
+        buffered_bytes,
+        last_seq,
+        last_frame_at_ms,
+        message,
+    };
+    publish_encoder_status(status.clone());
+    let _ = app.emit(ENCODER_MONITOR_STATUS_EVENT, status);
+}
+
+fn parse_encoder_frames(buffer: &mut Vec<u8>) -> EncoderParseResult {
+    const FRAME_LEN: usize = 20;
+    const SYNC_A: u8 = 0xA5;
+    const SYNC_B: u8 = 0xC3;
+
+    let mut frames = Vec::new();
+    let mut crc_errors = 0usize;
+    let mut discarded_bytes = 0usize;
+
+    loop {
+        if buffer.len() < 2 {
+            break;
+        }
+
+        let sync_position = buffer
+            .windows(2)
+            .position(|window| window[0] == SYNC_A && window[1] == SYNC_B);
+
+        match sync_position {
+            Some(position) if position > 0 => {
+                buffer.drain(..position);
+                discarded_bytes += position;
+            }
+            Some(_) => {}
+            None => {
+                let keep_last = buffer.last().copied() == Some(SYNC_A);
+                let keep = usize::from(keep_last);
+                let drain_len = buffer.len().saturating_sub(keep);
+                buffer.drain(..drain_len);
+                discarded_bytes += drain_len;
+                break;
+            }
+        }
+
+        if buffer.len() < FRAME_LEN {
+            break;
+        }
+
+        let frame = &buffer[..FRAME_LEN];
+        let expected_crc = crc8(&frame[2..19]);
+        if expected_crc != frame[19] {
+            buffer.drain(..1);
+            crc_errors += 1;
+            discarded_bytes += 1;
+            continue;
+        }
+
+        let seq = frame[2];
+        let mut raw_rpm = [0i16; 8];
+        for channel in 0..8 {
+            let offset = 3 + channel * 2;
+            raw_rpm[channel] = i16::from_le_bytes([frame[offset], frame[offset + 1]]);
+        }
+
+        frames.push((seq, raw_rpm));
+        buffer.drain(..FRAME_LEN);
+    }
+
+    EncoderParseResult {
+        frames,
+        crc_errors,
+        discarded_bytes,
+    }
+}
+
+fn crc8(bytes: &[u8]) -> u8 {
+    let mut crc = 0u8;
+
+    for byte in bytes {
+        crc ^= *byte;
+        for _ in 0..8 {
+            crc = if crc & 0x80 != 0 {
+                (crc << 1) ^ 0x07
+            } else {
+                crc << 1
+            };
+        }
+    }
+
+    crc
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 fn require_port_name(port_name: &str) -> Result<String, String> {
     let trimmed_port = port_name.trim().to_string();
 
@@ -366,9 +856,13 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             detect_backplane,
             upload_schedule,
+            prepare_schedule,
             start_schedule,
             stop_schedule,
             get_status,
+            start_encoder_monitor,
+            stop_encoder_monitor,
+            get_encoder_monitor_snapshot,
             list_data_files,
             save_data_file,
             load_data_file,
@@ -380,7 +874,8 @@ pub fn run() {
 
 mod protocol {
     use super::{
-        BoardStatus, CardSlotInfo, SchedulerBlockInput, SchedulerRowInput, SerialLogEntry,
+        BoardStatus, CardSlotInfo, PrepareStatus, SchedulerBlockInput, SchedulerRowInput,
+        SerialLogEntry,
     };
     use std::collections::{BTreeMap, HashMap, HashSet};
     use std::thread;
@@ -397,6 +892,8 @@ mod protocol {
     const MSG_STOP_SCHEDULE: u8 = 0x13;
     const MSG_GET_STATUS: u8 = 0x14;
     const MSG_GET_CARD_INVENTORY: u8 = 0x15;
+    const MSG_PREPARE_SCHEDULE: u8 = 0x16;
+    const MSG_GET_PREPARE_STATUS: u8 = 0x17;
     const ACK_OK: u8 = 0x00;
     const CARD_TYPE_NONE: u8 = 0x00;
     const CARD_TYPE_PUMP_PERISTALTIC: u8 = 0x01;
@@ -423,9 +920,13 @@ mod protocol {
     const INVENTORY_SEQ: u16 = 2;
     const RESPONSE_TIMEOUT: Duration = Duration::from_millis(1_000);
     const START_RESPONSE_TIMEOUT: Duration = Duration::from_millis(3_000);
+    const PREPARE_RESPONSE_TIMEOUT: Duration = Duration::from_millis(6_000);
+    const PREPARE_READY_TIMEOUT: Duration = Duration::from_millis(3_000);
+    const PREPARE_STATUS_POLL_DELAY: Duration = Duration::from_millis(100);
     const INTER_COMMAND_DELAY: Duration = Duration::from_millis(50);
     const READ_IDLE_DELAY: Duration = Duration::from_millis(10);
     const UPLOAD_ATTEMPTS: usize = 3;
+    const PREPARE_ATTEMPTS: usize = 3;
     const START_ATTEMPTS: usize = 3;
     const PWM_BOUNDARY_GUARD_US: u64 = 1;
     pub struct ProtocolResult<T> {
@@ -556,6 +1057,104 @@ mod protocol {
         }
 
         Ok(status)
+    }
+
+    pub fn prepare_schedule(port_name: &str) -> ProtocolResult<BoardStatus> {
+        with_client(port_name, |client| {
+            let mut seq = 1u16;
+            client.ping(seq)?;
+            seq = next_seq(seq);
+            thread::sleep(INTER_COMMAND_DELAY);
+
+            let mut last_error = None;
+
+            for attempt in 1..=PREPARE_ATTEMPTS {
+                match prepare_schedule_attempt(client, &mut seq) {
+                    Ok(status) => return Ok(status),
+                    Err(error) if is_pump_offload_error(&error) => {
+                        last_error = Some(error);
+
+                        if attempt < PREPARE_ATTEMPTS {
+                            client.log_note(&format!(
+                                "Prepare attempt {attempt} failed during card offload; retrying PREPARE_SCHEDULE."
+                            ));
+                            thread::sleep(INTER_COMMAND_DELAY);
+                        }
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+
+            Err(format!(
+                "{} Prepare was retried {} times.",
+                last_error.unwrap_or_else(|| "Card queue offload failed.".to_string()),
+                PREPARE_ATTEMPTS
+            ))
+        })
+    }
+
+    fn prepare_schedule_attempt(
+        client: &mut BackplaneClient,
+        seq: &mut u16,
+    ) -> Result<BoardStatus, String> {
+        client.log_note("Preparing card queues and preloading pump DAC speeds.");
+        client.prepare_schedule(*seq)?;
+        *seq = next_seq(*seq);
+        thread::sleep(INTER_COMMAND_DELAY);
+
+        wait_for_prepare_ready(client, seq)?;
+
+        let prepared_status = client.get_status(*seq)?;
+        *seq = next_seq(*seq);
+        thread::sleep(INTER_COMMAND_DELAY);
+
+        if prepared_status.state_code == 4 {
+            return Err(format!(
+                "Board entered error state after prepare. Last error: 0x{:02X}.",
+                prepared_status.last_error
+            ));
+        }
+
+        if prepared_status.event_count == 0 {
+            return Err("Prepare completed, but the board reports no loaded events.".to_string());
+        }
+
+        Ok(prepared_status)
+    }
+
+    fn wait_for_prepare_ready(
+        client: &mut BackplaneClient,
+        seq: &mut u16,
+    ) -> Result<PrepareStatus, String> {
+        let deadline = Instant::now() + PREPARE_READY_TIMEOUT;
+        let mut last_status = None;
+
+        while Instant::now() < deadline {
+            let prepare_status = client.get_prepare_status(*seq)?;
+            *seq = next_seq(*seq);
+
+            if !prepare_status.prepared {
+                return Err("Schedule prepare was acknowledged, but the board does not report a prepared schedule.".to_string());
+            }
+
+            if prepare_status.ready {
+                thread::sleep(INTER_COMMAND_DELAY);
+                return Ok(prepare_status);
+            }
+
+            last_status = Some(prepare_status);
+            thread::sleep(PREPARE_STATUS_POLL_DELAY);
+        }
+
+        if let Some(status) = last_status {
+            Err(format!(
+                "Schedule prepare did not become ready within {:.1}s; {} ms remaining.",
+                PREPARE_READY_TIMEOUT.as_secs_f32(),
+                status.remaining_delay_ms
+            ))
+        } else {
+            Err("Schedule prepare did not return a status response.".to_string())
+        }
     }
 
     pub fn start_schedule(port_name: &str) -> ProtocolResult<()> {
@@ -1409,6 +2008,16 @@ mod protocol {
             )
         }
 
+        fn prepare_schedule(&mut self, seq: u16) -> Result<(), String> {
+            self.request_ack(
+                "PREPARE_SCHEDULE",
+                MSG_PREPARE_SCHEDULE,
+                seq,
+                &[],
+                PREPARE_RESPONSE_TIMEOUT,
+            )
+        }
+
         fn start_schedule(&mut self, seq: u16) -> Result<(), String> {
             self.request_ack(
                 "START_SCHEDULE",
@@ -1417,6 +2026,38 @@ mod protocol {
                 &[],
                 START_RESPONSE_TIMEOUT,
             )
+        }
+
+        fn get_prepare_status(&mut self, seq: u16) -> Result<PrepareStatus, String> {
+            let frames = self.collect_until(
+                "GET_PREPARE_STATUS",
+                MSG_GET_PREPARE_STATUS,
+                seq,
+                &[],
+                RESPONSE_TIMEOUT,
+                |frames| {
+                    frames.iter().any(|frame| frame_is_ok_ack(frame, seq))
+                        && frames
+                            .iter()
+                            .any(|frame| frame.msg_type == MSG_GET_PREPARE_STATUS)
+                },
+            )?;
+
+            if !frames.iter().any(|frame| frame_is_ok_ack(frame, seq)) {
+                return Err(format_unexpected_response(
+                    "Prepare status request was not acknowledged",
+                    &frames,
+                ));
+            }
+
+            let status_frame = frames
+                .iter()
+                .find(|frame| frame.msg_type == MSG_GET_PREPARE_STATUS)
+                .ok_or_else(|| {
+                    format_unexpected_response("Prepare status response missing", &frames)
+                })?;
+
+            parse_prepare_status_payload(&status_frame.payload)
         }
 
         fn stop_schedule(&mut self, seq: u16) -> Result<(), String> {
@@ -1643,6 +2284,24 @@ mod protocol {
         })
     }
 
+    fn parse_prepare_status_payload(payload: &[u8]) -> Result<PrepareStatus, String> {
+        if payload.len() != 8 {
+            return Err(format!(
+                "Malformed prepare status response: expected 8 bytes, got {}.",
+                payload.len()
+            ));
+        }
+
+        Ok(PrepareStatus {
+            prepared: payload[0] != 0,
+            ready: payload[1] != 0,
+            legacy_start_pending: payload[2] != 0,
+            remaining_delay_ms: u32::from_le_bytes([
+                payload[4], payload[5], payload[6], payload[7],
+            ]),
+        })
+    }
+
     fn scheduler_state_name(state_code: u8) -> &'static str {
         match state_code {
             0 => "idle",
@@ -1733,13 +2392,19 @@ mod protocol {
     }
 
     fn is_pump_offload_error(error: &str) -> bool {
-        error.contains("(ERR_BAD_MODULE 0x07)") && error.contains("Pump offload failed")
+        error.contains("(ERR_BAD_MODULE 0x07)") && error.contains("offload failed")
     }
 
     fn format_protocol_error(label: &str, error_code: u8, detail: u8) -> String {
-        if label == "START_SCHEDULE" && error_code == 0x07 {
+        if (label == "PREPARE_SCHEDULE" || label == "START_SCHEDULE") && error_code == 0x07 {
+            let slot_hint = if detail % 8 == 0 {
+                format!(" Possible pump slot: {}.", detail / 8)
+            } else {
+                String::new()
+            };
+
             return format!(
-                "Pump offload failed for pump card slot {detail} (ERR_BAD_MODULE 0x07)."
+                "Card queue offload failed during {label}; diagnostic 0x{detail:02X}.{slot_hint} (ERR_BAD_MODULE 0x07)."
             );
         }
 
@@ -1824,6 +2489,19 @@ mod protocol {
                     Err(_) => format!("STATUS seq={} malformed", frame.seq),
                 }
             }
+            MSG_GET_PREPARE_STATUS if frame.payload.len() == 8 => {
+                match parse_prepare_status_payload(&frame.payload) {
+                    Ok(status) => format!(
+                    "PREPARE_STATUS seq={} prepared={} ready={} legacy_pending={} remaining={}ms",
+                    frame.seq,
+                    status.prepared as u8,
+                    status.ready as u8,
+                    status.legacy_start_pending as u8,
+                    status.remaining_delay_ms
+                ),
+                    Err(_) => format!("PREPARE_STATUS seq={} malformed", frame.seq),
+                }
+            }
             MSG_GET_CARD_INVENTORY => {
                 format!(
                     "INVENTORY seq={} payload={}B",
@@ -1851,6 +2529,8 @@ mod protocol {
             MSG_STOP_SCHEDULE => "STOP_SCHEDULE",
             MSG_GET_STATUS => "GET_STATUS",
             MSG_GET_CARD_INVENTORY => "GET_CARD_INVENTORY",
+            MSG_PREPARE_SCHEDULE => "PREPARE_SCHEDULE",
+            MSG_GET_PREPARE_STATUS => "GET_PREPARE_STATUS",
             _ => "FRAME",
         }
     }
@@ -1971,7 +2651,7 @@ mod protocol {
     }
 
     #[cfg(windows)]
-    mod serial {
+    pub(crate) mod serial {
         use std::ffi::OsStr;
         use std::mem::{size_of, zeroed};
         use std::os::windows::ffi::OsStrExt;
@@ -1993,6 +2673,8 @@ mod protocol {
         }
 
         struct SerialHandle(HANDLE);
+
+        unsafe impl Send for SerialConnection {}
 
         impl Drop for SerialHandle {
             fn drop(&mut self) {
@@ -2153,7 +2835,7 @@ mod protocol {
     }
 
     #[cfg(not(windows))]
-    mod serial {
+    pub(crate) mod serial {
         pub struct SerialConnection;
 
         impl SerialConnection {
@@ -2169,5 +2851,48 @@ mod protocol {
                 Ok(0)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{crc8, parse_encoder_frames};
+
+    #[test]
+    fn parses_encoder_monitor_frame_with_signed_scaled_rpm() {
+        let raw_values = [123i16, -45, 0, 1, -1, 327, -327, 10];
+        let mut frame = vec![0xA5, 0xC3, 0x7E];
+
+        for value in raw_values {
+            frame.extend_from_slice(&value.to_le_bytes());
+        }
+
+        let crc = crc8(&frame[2..19]);
+        frame.push(crc);
+
+        let mut buffer = frame;
+        let result = parse_encoder_frames(&mut buffer);
+
+        assert_eq!(result.crc_errors, 0);
+        assert_eq!(result.discarded_bytes, 0);
+        assert!(buffer.is_empty());
+        assert_eq!(result.frames.len(), 1);
+        assert_eq!(result.frames[0].0, 0x7E);
+        assert_eq!(result.frames[0].1, raw_values);
+    }
+
+    #[test]
+    fn rejects_encoder_monitor_frame_with_bad_crc() {
+        let mut frame = vec![0xA5, 0xC3, 0x01];
+        for _ in 0..8 {
+            frame.extend_from_slice(&0i16.to_le_bytes());
+        }
+        frame.push(0xFF);
+
+        let mut buffer = frame;
+        let result = parse_encoder_frames(&mut buffer);
+
+        assert_eq!(result.frames.len(), 0);
+        assert_eq!(result.crc_errors, 1);
     }
 }

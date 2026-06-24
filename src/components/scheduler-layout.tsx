@@ -21,9 +21,10 @@ interface SchedulerLayoutProps {
 
 const COLLAPSED_SIDEBAR_WIDTH = 72;
 const DEFAULT_SIDEBAR_WIDTH = 520;
-const MIN_SIDEBAR_WIDTH = 380;
+const MIN_SIDEBAR_WIDTH = 340;
 const SIDEBAR_MAX_FRACTION = 1 / 3;
 const SIDEBAR_WIDTH_STORAGE_KEY = "experiment-scheduler:sidebar-width";
+type SidebarDockSide = "left" | "right";
 
 function getWindowWidth() {
   return typeof window === "undefined" ? 1680 : window.innerWidth;
@@ -62,13 +63,16 @@ export function SchedulerLayout({
   const [sidebarWidth, setSidebarWidth] = useState(() =>
     clampSidebarWidth(getStoredSidebarWidth()),
   );
+  const [sidebarDockSide, setSidebarDockSide] = useState<SidebarDockSide>("right");
   const [isResizingSidebar, setIsResizingSidebar] = useState(false);
   const gridTemplateColumns = useMemo(
-    () =>
-      isSidebarCollapsed
-        ? `minmax(0,1fr) ${COLLAPSED_SIDEBAR_WIDTH}px`
-        : `minmax(0,1fr) ${sidebarWidth}px`,
-    [isSidebarCollapsed, sidebarWidth],
+    () => {
+      const sidebarColumn = `${isSidebarCollapsed ? COLLAPSED_SIDEBAR_WIDTH : sidebarWidth}px`;
+      return sidebarDockSide === "left"
+        ? `${sidebarColumn} minmax(0,1fr)`
+        : `minmax(0,1fr) ${sidebarColumn}`;
+    },
+    [isSidebarCollapsed, sidebarDockSide, sidebarWidth],
   );
 
   useEffect(() => {
@@ -91,6 +95,20 @@ export function SchedulerLayout({
     }
   }, []);
 
+  const handleToggleSidebarCollapsed = useCallback(() => {
+    setIsSidebarCollapsed((current) => {
+      if (!current) {
+        updateSidebarWidth(DEFAULT_SIDEBAR_WIDTH);
+      }
+
+      return !current;
+    });
+  }, [updateSidebarWidth]);
+
+  const handleToggleSidebarDockSide = useCallback(() => {
+    setSidebarDockSide((current) => current === "left" ? "right" : "left");
+  }, []);
+
   const handleResizePointerDown = useCallback(
     (event: PointerEvent<HTMLButtonElement>) => {
       if (isSidebarCollapsed) {
@@ -106,10 +124,14 @@ export function SchedulerLayout({
       event.currentTarget.setPointerCapture(event.pointerId);
       setIsResizingSidebar(true);
 
-      const layoutRight = layoutNode.getBoundingClientRect().right;
+      const layoutRect = layoutNode.getBoundingClientRect();
 
       const handlePointerMove = (moveEvent: globalThis.PointerEvent) => {
-        updateSidebarWidth(layoutRight - moveEvent.clientX);
+        updateSidebarWidth(
+          sidebarDockSide === "left"
+            ? moveEvent.clientX - layoutRect.left
+            : layoutRect.right - moveEvent.clientX,
+        );
       };
 
       const handlePointerUp = () => {
@@ -123,7 +145,44 @@ export function SchedulerLayout({
       window.addEventListener("pointerup", handlePointerUp);
       window.addEventListener("pointercancel", handlePointerUp);
     },
-    [isSidebarCollapsed, updateSidebarWidth],
+    [isSidebarCollapsed, sidebarDockSide, updateSidebarWidth],
+  );
+
+  const sidebarPanel = (
+    <div className="relative min-h-0 min-w-0 overflow-hidden">
+      <button
+        aria-label="Resize sidebar"
+        className={cn(
+          "absolute top-0 z-20 h-full w-5 cursor-col-resize rounded-full transition hover:bg-sky-200/35",
+          sidebarDockSide === "left" ? "-right-3" : "-left-3",
+          isSidebarCollapsed ? "hidden" : "hidden lg:block",
+          isResizingSidebar && "bg-sky-200/50",
+        )}
+        onPointerDown={handleResizePointerDown}
+        title="Resize sidebar"
+        type="button"
+      >
+        <span className="mx-auto block h-full w-px bg-border/80" />
+      </button>
+      <SchedulerSidebar
+        collapsed={isSidebarCollapsed}
+        dockSide={sidebarDockSide}
+        onToggleCollapsed={handleToggleSidebarCollapsed}
+        onToggleDockSide={handleToggleSidebarDockSide}
+      />
+    </div>
+  );
+
+  const timelinePanel = (
+    <div className="min-h-0 min-w-0">
+      <TimelineGrid
+        scrollRef={scrollRef}
+        totalDurationMs={totalDurationMs}
+        onDismissContextMenu={onDismissContextMenu}
+        onOpenBlockContextMenu={onOpenBlockContextMenu}
+        onOpenInsertContextMenu={onOpenInsertContextMenu}
+      />
+    </div>
   );
 
   return (
@@ -135,34 +194,8 @@ export function SchedulerLayout({
       )}
       style={{ gridTemplateColumns }}
     >
-      <div className="min-h-0 min-w-0">
-        <TimelineGrid
-          scrollRef={scrollRef}
-          totalDurationMs={totalDurationMs}
-          onDismissContextMenu={onDismissContextMenu}
-          onOpenBlockContextMenu={onOpenBlockContextMenu}
-          onOpenInsertContextMenu={onOpenInsertContextMenu}
-        />
-      </div>
-      <div className="relative min-h-0 min-w-0 overflow-hidden">
-        <button
-          aria-label="Resize sidebar"
-          className={cn(
-            "absolute -left-3 top-0 z-20 h-full w-5 cursor-col-resize rounded-full transition hover:bg-sky-200/35",
-            isSidebarCollapsed ? "hidden" : "hidden lg:block",
-            isResizingSidebar && "bg-sky-200/50",
-          )}
-          onPointerDown={handleResizePointerDown}
-          title="Resize sidebar"
-          type="button"
-        >
-          <span className="mx-auto block h-full w-px bg-border/80" />
-        </button>
-        <SchedulerSidebar
-          collapsed={isSidebarCollapsed}
-          onToggleCollapsed={() => setIsSidebarCollapsed((current) => !current)}
-        />
-      </div>
+      {sidebarDockSide === "left" ? sidebarPanel : timelinePanel}
+      {sidebarDockSide === "left" ? timelinePanel : sidebarPanel}
     </div>
   );
 }

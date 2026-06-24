@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Plus } from "lucide-react";
+import { listen } from "@tauri-apps/api/event";
 import { BlockContextMenu } from "@/components/block-context-menu";
 import { FloatingWindow } from "@/components/floating-window";
 import { SchedulerLayout } from "@/components/scheduler-layout";
@@ -7,9 +8,19 @@ import { TopToolbar } from "@/components/top-toolbar";
 import { Button } from "@/components/ui/button";
 import { ROW_HEADER_WIDTH } from "@/lib/layout";
 import { stopBoardSchedule } from "@/lib/board-api";
+import {
+  ENCODER_SAMPLE_EVENT,
+  ENCODER_STATUS_EVENT,
+  getEncoderMonitorSnapshot,
+  startEncoderMonitor,
+  type EncoderMonitorSample,
+  type EncoderMonitorStatus,
+} from "@/lib/encoder-api";
 import { emitBlockCreationGuide } from "@/lib/smart-guides";
+import { hasTauriRuntime } from "@/lib/tauri-runtime";
 import { formatTimelineTime, getRequiredScheduleDuration, msToPx, pxToMs } from "@/lib/time";
 import { useBoardStore } from "@/store/board-store";
+import { useEncoderStore } from "@/store/encoder-store";
 import { useSchedulerStore } from "@/store/scheduler-store";
 import type { Block } from "@/types/scheduler";
 
@@ -92,10 +103,17 @@ export function AppShell() {
   const redo = useSchedulerStore((state) => state.redo);
   const syncPlayhead = useSchedulerStore((state) => state.syncPlayhead);
   const setSelectedBlock = useSchedulerStore((state) => state.setSelectedBlock);
+  const encoderPort = useEncoderStore((state) => state.encoderPort);
+  const encoderConnectionState = useEncoderStore((state) => state.connectionState);
+  const ingestEncoderSnapshot = useEncoderStore((state) => state.ingestSnapshot);
+  const setEncoderConnectionState = useEncoderStore((state) => state.setConnectionState);
+  const resetEncoderTelemetry = useEncoderStore((state) => state.resetTelemetry);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const autoStopRequestedRef = useRef(false);
+  const encoderAutoconnectStartedRef = useRef(false);
   const lastContextMenuRef = useRef<ContextMenuState | null>(null);
+  const pendingBatchDeleteIdsRef = useRef<string[]>([]);
   const shortcutsRef = useRef({
     blocks,
     copiedBlocks: [] as Block[],
@@ -106,6 +124,130 @@ export function AppShell() {
   const [copiedBlocks, setCopiedBlocks] = useState<Block[]>([]);
   const [viewportStartMs, setViewportStartMs] = useState(0);
   const [viewportDurationMs, setViewportDurationMs] = useState(20 * 60_000);
+
+  useEffect(() => {
+    if (!hasTauriRuntime()) {
+      return;
+    }
+
+    let unlisten: (() => void) | null = null;
+    let unlistenStatus: (() => void) | null = null;
+
+    void listen<EncoderMonitorSample>(ENCODER_SAMPLE_EVENT, (event) => {
+      useEncoderStore.getState().ingestSample(event.payload);
+    }).then((nextUnlisten) => {
+      unlisten = nextUnlisten;
+    }).catch((error) => {
+      useEncoderStore.getState().setConnectionState(
+        "error",
+        `Encoder sample listener failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
+
+    void listen<EncoderMonitorStatus>(ENCODER_STATUS_EVENT, (event) => {
+      useEncoderStore.getState().ingestStatus(event.payload);
+    }).then((nextUnlisten) => {
+      unlistenStatus = nextUnlisten;
+    }).catch((error) => {
+      useEncoderStore.getState().setConnectionState(
+        "error",
+        `Encoder status listener failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
+
+    return () => {
+      unlisten?.();
+      unlistenStatus?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!hasTauriRuntime() || encoderAutoconnectStartedRef.current) {
+      return;
+    }
+
+    const trimmedPort = encoderPort.trim();
+    if (!trimmedPort || encoderConnectionState !== "idle") {
+      return;
+    }
+
+    encoderAutoconnectStartedRef.current = true;
+    let isCancelled = false;
+
+    const connectEncoderMonitor = async () => {
+      setEncoderConnectionState("connecting", `Opening ${trimmedPort}...`);
+
+      try {
+        const result = await startEncoderMonitor(trimmedPort);
+        if (isCancelled) {
+          return;
+        }
+
+        if (result.ok) {
+          resetEncoderTelemetry();
+          setEncoderConnectionState("connected", result.message);
+        } else {
+          setEncoderConnectionState("error", result.message);
+        }
+      } catch (error) {
+        if (!isCancelled) {
+          setEncoderConnectionState(
+            "error",
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      }
+    };
+
+    void connectEncoderMonitor();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [
+    encoderConnectionState,
+    encoderPort,
+    resetEncoderTelemetry,
+    setEncoderConnectionState,
+  ]);
+
+  useEffect(() => {
+    if (!hasTauriRuntime()) {
+      return;
+    }
+
+    if (encoderConnectionState !== "connected" && encoderConnectionState !== "connecting") {
+      return;
+    }
+
+    let isCancelled = false;
+
+    const pollEncoderSnapshot = async () => {
+      try {
+        const snapshot = await getEncoderMonitorSnapshot();
+        if (!isCancelled) {
+          ingestEncoderSnapshot(snapshot);
+        }
+      } catch (error) {
+        if (!isCancelled) {
+          setEncoderConnectionState(
+            "error",
+            `Encoder monitor polling failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+    };
+
+    void pollEncoderSnapshot();
+    const intervalId = window.setInterval(() => {
+      void pollEncoderSnapshot();
+    }, 100);
+
+    return () => {
+      isCancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [encoderConnectionState, ingestEncoderSnapshot, setEncoderConnectionState]);
 
   useEffect(() => {
     const handleSyncSourcePicked = (event: Event) => {
@@ -137,6 +279,16 @@ export function AppShell() {
   }, [setSelectedBlock]);
 
   useEffect(() => {
+    const pendingBatchDeleteIds = pendingBatchDeleteIdsRef.current;
+    if (selectedBlockIds.length > 1) {
+      pendingBatchDeleteIdsRef.current = [...selectedBlockIds];
+    } else if (
+      pendingBatchDeleteIds.length > 0 &&
+      (selectedBlockIds.length === 0 || !pendingBatchDeleteIds.includes(selectedBlockIds[0]))
+    ) {
+      pendingBatchDeleteIdsRef.current = [];
+    }
+
     shortcutsRef.current = {
       blocks,
       copiedBlocks,
@@ -267,12 +419,30 @@ export function AppShell() {
         target instanceof HTMLTextAreaElement ||
         target instanceof HTMLSelectElement ||
         target?.isContentEditable;
-      const shortcutState = shortcutsRef.current;
+      const schedulerState = useSchedulerStore.getState();
+      const shortcutState = {
+        blocks: schedulerState.blocks,
+        copiedBlocks: shortcutsRef.current.copiedBlocks,
+        selectedBlockIds: schedulerState.selectedBlockIds,
+      };
 
       if (event.key === "Delete" && shortcutState.selectedBlockIds.length > 0 && !isTypingTarget) {
         event.preventDefault();
         event.stopPropagation();
-        deleteBlocks(shortcutState.selectedBlockIds);
+        const pendingBatchDeleteIds = pendingBatchDeleteIdsRef.current;
+        const selectedBlockIdSet = new Set(shortcutState.selectedBlockIds);
+        const liveBlockIds = new Set(shortcutState.blocks.map((block) => block.id));
+        const pendingBatchStillApplies =
+          shortcutState.selectedBlockIds.length === 1 &&
+          pendingBatchDeleteIds.length > 1 &&
+          pendingBatchDeleteIds.includes(shortcutState.selectedBlockIds[0]) &&
+          pendingBatchDeleteIds.every((blockId) => liveBlockIds.has(blockId));
+        const blockIdsToDelete = pendingBatchStillApplies
+          ? pendingBatchDeleteIds
+          : shortcutState.selectedBlockIds.filter((blockId) => selectedBlockIdSet.has(blockId));
+
+        pendingBatchDeleteIdsRef.current = [];
+        deleteBlocks(blockIdsToDelete);
       }
 
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z" && !isTypingTarget) {
@@ -301,6 +471,9 @@ export function AppShell() {
           event.preventDefault();
           event.stopPropagation();
           const nextCopiedBlocks = blocksToCopy.map((block) => ({ ...block }));
+          if (nextCopiedBlocks.length > 1) {
+            pendingBatchDeleteIdsRef.current = nextCopiedBlocks.map((block) => block.id);
+          }
           shortcutsRef.current.copiedBlocks = nextCopiedBlocks;
           setCopiedBlocks(nextCopiedBlocks);
         }
@@ -318,6 +491,9 @@ export function AppShell() {
             .getState()
             .blocks.filter((block) => !previousBlockIds.has(block.id))
             .map((block) => block.id);
+          if (newBlockIds.length > 1) {
+            pendingBatchDeleteIdsRef.current = newBlockIds;
+          }
           emitBlockCreationGuide(newBlockIds);
         }
       }

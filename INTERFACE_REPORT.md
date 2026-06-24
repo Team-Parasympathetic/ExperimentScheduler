@@ -53,6 +53,8 @@ Current command IDs:
 0x13 MSG_STOP_SCHEDULE
 0x14 MSG_GET_STATUS
 0x15 MSG_GET_CARD_INVENTORY
+0x16 MSG_PREPARE_SCHEDULE
+0x17 MSG_GET_PREPARE_STATUS
 ```
 
 Recommended GUI flow:
@@ -62,6 +64,8 @@ PING
 GET_CARD_INVENTORY
 CLEAR_SCHEDULE
 UPLOAD_EVENT ... repeat for all events
+PREPARE_SCHEDULE
+poll GET_PREPARE_STATUS until ready
 START_SCHEDULE
 poll GET_STATUS until RUNNING
 poll GET_STATUS until STOPPED or ERROR
@@ -76,7 +80,7 @@ The host should keep the existing request/response discipline: send one command,
 
 Payload: empty.
 
-Clears the backplane's in-memory schedule and cancels any pending delayed start. This is rejected while actively running.
+Clears the backplane's in-memory schedule, cancels any pending delayed start, and clears prepared card-local queues. This is rejected while actively running.
 
 `MSG_UPLOAD_EVENT = 0x11`
 
@@ -111,35 +115,90 @@ timestamps must be strictly increasing
 zero-action events are not accepted
 ```
 
-`MSG_START_SCHEDULE = 0x12`
+`MSG_PREPARE_SCHEDULE = 0x16`
 
 Payload: empty.
 
 Current behavior:
 
 1. Validate the uploaded schedule.
-2. Upload/preload pump-card local queues.
+2. Upload pump-card local queues.
 3. Verify each required pump-card queue using count, last event index, and a lightweight queue checksum.
-4. Upload/preload Timing Card FPGA event/action queues.
-5. Return `ACK OK`.
-6. Wait 1 second.
-7. Arm pump cards and the Timing Card.
-8. Scheduler state becomes `SCHED_RUNNING`.
+4. Upload Timing Card FPGA event/action queues.
+5. Verify the Timing Card queues using event/action counts, last event/action values, and lightweight queue checksums.
+6. Command required pump cards to begin the initial DAC preload ramp, then wait for the firmware-defined preload window. This is currently 1 second, which covers a full-scale 0-5 V ramp at 10 V/s with margin.
+7. Return `ACK OK`.
+8. Hold the prepared schedule in an additional 1 second safety/settling window before it may be started.
 
-Important: the `START_SCHEDULE` ACK means "accepted and prepared", not "already running". The GUI must poll `GET_STATUS` and wait for `scheduler_state == 2`.
+Important: `PREPARE_SCHEDULE` does not arm pump cards or the Timing Card. It prepares card-local queues, performs the initial pump DAC preload ramp, then starts the GUI-visible ready delay. The GUI should allow a longer timeout for `PREPARE_SCHEDULE` because the command may not ACK until the preload ramp window has completed.
 
-`MSG_UPLOAD_EVENT` stores the schedule in backplane memory only. Pump-card queue offload happens during `MSG_START_SCHEDULE`, so upload success does not prove the pump card already contains the schedule.
+`MSG_START_SCHEDULE = 0x12`
 
-Pump-card offload failures return an immediate error response to `START_SCHEDULE`:
+Payload: empty.
+
+Current prepared-flow behavior:
+
+1. If the schedule is already prepared and ready, write the RUN control bit to pump cards and the Timing Card.
+2. Scheduler state becomes `SCHED_RUNNING`.
+
+If `START_SCHEDULE` is sent before `PREPARE_SCHEDULE`, the firmware preserves legacy behavior:
+
+1. Validate the uploaded schedule.
+2. Upload and verify pump-card and Timing Card queues.
+3. Command required pump cards to begin the initial DAC preload ramp and wait for the preload window.
+4. Return `ACK OK`.
+5. Wait the additional 1 second ready delay.
+6. Arm pump cards and the Timing Card.
+7. Scheduler state becomes `SCHED_RUNNING`.
+
+If `START_SCHEDULE` is sent after prepare but before the 1 second ready delay has elapsed, the firmware returns `ERR_BUSY_RUNNING`.
+
+Important: a `START_SCHEDULE` ACK only means "accepted". In the legacy path it still does not mean "already running"; the GUI must poll `GET_STATUS` and wait for `scheduler_state == 2`.
+
+`MSG_UPLOAD_EVENT` stores the schedule in backplane memory only. Expansion-card queue offload happens during `MSG_PREPARE_SCHEDULE`, or during `MSG_START_SCHEDULE` only for the legacy no-prepare path. Upload success does not prove the expansion cards already contain the schedule.
+
+Pump-card or Timing Card offload failures return an immediate error response:
 
 ```text
 MSG_ERROR = 0x03
 payload = failed_seq:u16le, error_code:u8, detail:u8
 error_code = 0x07 ERR_BAD_MODULE
-detail = pump-card slot for upload/readback/checksum failures
+detail = card/field-specific diagnostic byte
 ```
 
-For pump-card discovery or validation failures, `detail` may be the base pump module ID for the missing slot, currently `slot * 8`. If pump offload fails, the firmware clears the remote pump queues, does not start the Timing Card, and does not enter the delayed-start window.
+For pump-card discovery or validation failures, `detail` may be the base pump module ID for the missing slot, currently `slot * 8`. If card offload fails, the firmware clears prepared card queues and does not enter the ready/start window.
+
+`MSG_GET_PREPARE_STATUS = 0x17`
+
+Payload: empty.
+
+Response after ACK:
+
+```text
+offset  size  field
+0       1     prepared:u8
+1       1     ready:u8
+2       1     legacy_start_pending:u8
+3       1     reserved
+4       4     remaining_delay_ms:u32le
+```
+
+The GUI should enable the user's Run/Start action only when `prepared != 0` and `ready != 0`.
+
+Legacy `START_SCHEDULE` behavior before this split was:
+
+```text
+1. Validate the uploaded schedule.
+2. Upload pump-card local queues.
+3. Verify each required pump-card queue using count, last event index, and a lightweight queue checksum.
+4. Upload Timing Card FPGA event/action queues.
+5. Verify the Timing Card queues.
+6. Command required pump cards to begin the initial DAC preload ramp and wait for the preload window.
+7. Return `ACK OK`.
+8. Wait the additional 1 second ready delay.
+9. Arm pump cards and the Timing Card.
+10. Scheduler state becomes `SCHED_RUNNING`.
+```
 
 `MSG_STOP_SCHEDULE = 0x13`
 
@@ -177,8 +236,10 @@ Scheduler states:
 Expected state sequence around start:
 
 ```text
-START_SCHEDULE -> ACK OK
-GET_STATUS     -> SCHED_LOADED during the 1 second delayed-start window
+PREPARE_SCHEDULE     -> ACK OK
+GET_PREPARE_STATUS   -> prepared=1, ready=0 during the 1 second delay
+GET_PREPARE_STATUS   -> prepared=1, ready=1 when safe to start
+START_SCHEDULE       -> ACK OK
 GET_STATUS     -> SCHED_RUNNING after cards are armed
 GET_STATUS     -> SCHED_STOPPED when complete
 ```
@@ -219,6 +280,15 @@ Known card types:
 0x00 CARD_TYPE_NONE
 0x01 CARD_TYPE_PUMP_PERISTALTIC
 0x02 CARD_TYPE_FPGA_GPIO_SYNC
+```
+
+Pump Card expected values for post-response DAC preload support:
+
+```text
+card_type        = 0x01
+firmware         = 1.1 or newer
+capabilities     = 0x0001
+max_local_events = 48
 ```
 
 Timing Card expected values:
@@ -324,7 +394,10 @@ Configures the selected GPIO channel to mirror the Timing Card internal `sync_st
 
 ## Timing Quirks and GUI Requirements
 
-The firmware has a baked-in 1 second delay between successful `START_SCHEDULE` preparation and actual card arm. During that delay, status remains `SCHED_LOADED`.
+The firmware has two pump-start timing phases after schedule upload:
+
+1. `PREPARE_SCHEDULE` performs expansion-card queue offload/verification, commands the pump cards to start their initial DAC preload ramp, then waits silently for the preload window. This preload wait is currently 1 second. The GUI should allow `PREPARE_SCHEDULE` to take at least this long before ACK, plus normal queue upload time.
+2. After `PREPARE_SCHEDULE` returns `ACK OK`, the firmware applies an additional 1 second ready delay before `START_SCHEDULE` is allowed to arm the cards. During this delay, status remains `SCHED_LOADED` or `SCHED_STOPPED`, and `GET_PREPARE_STATUS` reports the remaining delay.
 
 The GUI should not display "running" based only on `START_SCHEDULE` ACK. It should poll `GET_STATUS` until `scheduler_state == SCHED_RUNNING`.
 

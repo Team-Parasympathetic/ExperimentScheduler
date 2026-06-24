@@ -1,51 +1,61 @@
 # Experiment Scheduler
 
-A graphical experiment manager designed for our lab's custom instrumentation control system. 
+Desktop experiment scheduler for the lab instrumentation stack. The app is a Tauri + React GUI for building timed pump and GPIO schedules, uploading them to the Instrument Control Unit, calibrating peristaltic pumps, and monitoring pump RPM telemetry from the Encoder Monitor.
 
-## Lab PC setup
+## Current Features
 
-Use this when you want to clone the repo on a Windows lab PC and run it like a normal desktop app, without `npm run dev`.
+- Timeline editor for peristaltic pump and GPIO/timing-card tracks.
+- Variable-rate and fixed-rate pump modes with matching calibration workflows.
+- PWM, pulse, status-output, and synchronized GPIO waveform blocks.
+- Robust schedule upload, prepare/preload, start warmup, status polling, and stop handling for the current binary firmware protocol.
+- Device Manager connections for the Instrument Control Unit and Encoder Monitor.
+- Live pump RPM readouts, rolling graphs, and encoder-driven 3D pump model animation.
+- Schedule and calibration JSON persistence in the app data directory.
 
-Prerequisites for the first setup:
+## Windows Install
+
+Install prerequisites once:
 
 - Git
 - Node.js LTS
-- Rust
+- Rust via `rustup` using the 64-bit MSVC toolchain
 - Microsoft Edge WebView2 Runtime
 
-From PowerShell:
+Clone and install:
 
 ```powershell
-git clone <repo-url>
+git clone https://github.com/kz2504/ExperimentScheduler.git
 cd ExperimentScheduler
-powershell -ExecutionPolicy Bypass -File .\scripts\windows\setup-lab-app.ps1
+.\Install-Lab-App.cmd
 ```
 
-Or double-click `Install-Lab-App.cmd` from the cloned folder.
+The installer builds the desktop app and creates fresh **Experiment Scheduler** shortcuts on the Desktop and in the Start Menu. The Start Menu shortcut cleanup removes stale shortcuts with the same app name before recreating the current one.
 
-The script builds the Tauri desktop app and creates shortcuts named **Experiment Scheduler** on the Desktop and in the Start Menu. After that, launch the app from the shortcut.
-
-To update the lab PC later:
+To update an existing lab PC checkout:
 
 ```powershell
-cd ExperimentScheduler
+cd C:\Users\ARN_s\ExperimentScheduler
 git pull
-powershell -ExecutionPolicy Bypass -File .\scripts\windows\setup-lab-app.ps1
+.\Install-Lab-App.cmd
 ```
 
-The update script closes any running **Experiment Scheduler** window before rebuilding. If Windows still reports that `experiment_scheduler.exe` cannot be removed, close the app manually, wait a few seconds for antivirus/file indexing to release it, and run `Install-Lab-App.cmd` again.
+If PowerShell blocks `npm`, use `npm.cmd` directly for manual commands, or run the provided installer script, which uses PowerShell's bypass mode internally.
 
-If the app was already built and you only need to recreate shortcuts:
+To recreate shortcuts without rebuilding:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\windows\setup-lab-app.ps1 -SkipBuild
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\setup-lab-app.ps1 -SkipBuild
 ```
 
-## Developer mode
+## Development
 
-For development on a machine with the toolchain installed:
-
-```bash
+```powershell
 npm ci
 npm run tauri dev
+```
+
+Build the frontend only:
+
+```powershell
+npm.cmd run build
 ```

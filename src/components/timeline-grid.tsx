@@ -109,7 +109,7 @@ export function TimelineGrid({
   const gridSizeMs = useSchedulerStore((state) => state.gridSizeMs);
   const zoomPxPerMinute = useSchedulerStore((state) => state.zoomPxPerMinute);
   const playheadMs = useSchedulerStore((state) => state.playheadMs);
-  const selectedRowId = useSchedulerStore((state) => state.selectedRowId);
+  const modelHighlightedRowId = useSchedulerStore((state) => state.modelHighlightedRowId);
   const selectedBlockIds = useSchedulerStore((state) => state.selectedBlockIds);
   const syncSourcePickTargetBlockId = useSchedulerStore(
     (state) => state.syncSourcePickTargetBlockId,
@@ -482,6 +482,7 @@ export function TimelineGrid({
         const hoveredRow = rows[nextRowIndex];
 
         if (
+          originBlocks.length === 1 &&
           hoveredRow &&
           hoveredRow.deviceType === originType &&
           !hoveredRow.isScheduleStatus
@@ -492,7 +493,7 @@ export function TimelineGrid({
         moveBlocks(
           originBlocks.map((block) => ({
             blockId: block.id,
-            rowId: nextRowId,
+            rowId: originBlocks.length === 1 ? nextRowId : block.rowId,
             startMs: block.startMs + nextDeltaMs,
           })),
           { recordHistory: false },
@@ -878,7 +879,7 @@ export function TimelineGrid({
 
           {rows.map((row, rowIndex) => {
             const rowBlocks = getSortedRowBlocks(blocks, row.id);
-            const isHighlightedRow = row.id === selectedRowId;
+            const isHighlightedRow = row.id === modelHighlightedRowId;
             return (
               <div
                 key={row.id}
@@ -983,8 +984,10 @@ export function TimelineGrid({
                   onOpenInsertMenu={(rowId, timeMs, x, y) => {
                     onOpenInsertContextMenu(rowId, snapMs(timeMs, gridSizeMs), x, y);
                   }}
-                  onSetPasteTarget={(rowId, timeMs) => {
+                  onClearSelection={() => {
                     setSelectedBlock(null);
+                  }}
+                  onSetPasteTarget={(rowId, timeMs) => {
                     setPasteTarget(rowId, snapMs(timeMs, gridSizeMs));
                   }}
                   onSelectBlock={setSelectedBlock}

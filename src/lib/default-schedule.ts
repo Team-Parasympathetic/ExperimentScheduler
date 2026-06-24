@@ -1,4 +1,4 @@
-import type { Block, Row } from "@/types/scheduler";
+import type { Block, PumpModelSlot, Row } from "@/types/scheduler";
 
 export const DEFAULT_SCHEDULE_FILE_NAME = "Default.json";
 
@@ -75,12 +75,24 @@ export const DEFAULT_SCHEDULE_ROWS: Row[] = [
 
 export const DEFAULT_SCHEDULE_BLOCKS: Block[] = [];
 
+export const DEFAULT_PUMP_MODEL_SLOTS: PumpModelSlot[] = [
+  {
+    id: "pump-model-default",
+    rowId: "row-a",
+    encoderChannel: 0,
+    x: 0,
+    y: 0,
+    z: 0,
+  },
+];
+
 export const DEFAULT_SCHEDULE_FILE = {
   kind: "experimentSchedule" as const,
   schemaVersion: 1 as const,
   savedAt: "2026-06-10T15:44:45.069Z",
   rows: DEFAULT_SCHEDULE_ROWS,
   blocks: DEFAULT_SCHEDULE_BLOCKS,
+  pumpModelSlots: DEFAULT_PUMP_MODEL_SLOTS,
   gridSizeMs: 500,
   zoomPxPerMinute: 1200,
   experimentDurationMs: 960_000,

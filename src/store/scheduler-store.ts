@@ -21,6 +21,7 @@ import {
 import {
   DEFAULT_SCHEDULE_BLOCKS,
   DEFAULT_SCHEDULE_FILE,
+  DEFAULT_PUMP_MODEL_SLOTS,
   DEFAULT_SCHEDULE_ROWS,
 } from "@/lib/default-schedule";
 import {
@@ -46,6 +47,7 @@ import type {
   Block,
   DeviceType,
   ExperimentState,
+  PumpModelSlot,
   PumpRateMode,
   Row,
   TriggerMode,
@@ -54,6 +56,7 @@ import type {
 interface SchedulerHistorySnapshot {
   rows: Row[];
   blocks: Block[];
+  pumpModelSlots: PumpModelSlot[];
   selectedBlockId: string | null;
   selectedBlockIds: string[];
   selectionAnchorBlockId: string | null;
@@ -77,6 +80,7 @@ interface BlockMoveUpdate {
 interface SchedulerState {
   rows: Row[];
   blocks: Block[];
+  pumpModelSlots: PumpModelSlot[];
   availablePumpHardwareIds: number[];
   past: SchedulerHistorySnapshot[];
   future: SchedulerHistorySnapshot[];
@@ -84,6 +88,8 @@ interface SchedulerState {
   selectedBlockId: string | null;
   selectedBlockIds: string[];
   selectionAnchorBlockId: string | null;
+  modelHighlightedRowId: string | null;
+  scheduleLoadNonce: number;
   syncSourcePickTargetBlockId: string | null;
   selectedRowId: string | null;
   pasteTargetStartMs: number | null;
@@ -96,8 +102,9 @@ interface SchedulerState {
   playheadStartTimestamp: number | null;
   setSelectedBlock: (
     blockId: string | null,
-    options?: { additive?: boolean; range?: boolean },
+    options?: { additive?: boolean },
   ) => void;
+  setModelHighlightedRow: (rowId: string | null) => void;
   setSyncSourcePickTargetBlock: (blockId: string | null) => void;
   setPasteTarget: (rowId: string, startMs?: number | null) => void;
   setGridSizeMs: (gridSizeMs: number) => void;
@@ -118,10 +125,18 @@ interface SchedulerState {
   loadSchedule: (schedule: {
     rows: Row[];
     blocks: Block[];
+    pumpModelSlots?: PumpModelSlot[];
     gridSizeMs: number;
     zoomPxPerMinute: number;
     experimentDurationMs: number;
   }) => void;
+  setPumpModelSlots: (pumpModelSlots: PumpModelSlot[]) => void;
+  addPumpModelSlot: (pumpModelSlot: PumpModelSlot) => void;
+  updatePumpModelSlot: (
+    slotId: string,
+    patch: Partial<Omit<PumpModelSlot, "id">>,
+  ) => void;
+  deletePumpModelSlot: (slotId: string) => void;
   addRow: (deviceType?: DeviceType) => void;
   removeRow: (rowId: string) => void;
   moveRow: (rowId: string, direction: -1 | 1) => void;
@@ -141,6 +156,59 @@ interface SchedulerState {
 
 const initialRows: Row[] = DEFAULT_SCHEDULE_ROWS.map((row) => ({ ...row }));
 const initialBlocks: Block[] = DEFAULT_SCHEDULE_BLOCKS.map((block) => ({ ...block }));
+const initialPumpModelSlots: PumpModelSlot[] = DEFAULT_PUMP_MODEL_SLOTS.map((slot) => ({ ...slot }));
+
+function createDefaultPumpModelSlots(rows: Row[]): PumpModelSlot[] {
+  const firstPumpRow = rows.find((row) => row.deviceType === "peristaltic" && !row.isScheduleStatus);
+
+  if (!firstPumpRow) {
+    return [];
+  }
+
+  return [
+    {
+      id: createId("pump-model"),
+      rowId: firstPumpRow.id,
+      encoderChannel: 0,
+      x: 0,
+      y: 0,
+      z: 0,
+    },
+  ];
+}
+
+function normalizeEncoderChannel(encoderChannel: number | undefined) {
+  if (encoderChannel === undefined || !Number.isInteger(encoderChannel)) {
+    return 0;
+  }
+
+  return clamp(encoderChannel, 0, 7);
+}
+
+function normalizePumpModelSlots(
+  slots: PumpModelSlot[] | undefined,
+  rows: Row[],
+): PumpModelSlot[] {
+  const validPumpRowIds = new Set(
+    rows
+      .filter((row) => row.deviceType === "peristaltic" && !row.isScheduleStatus)
+      .map((row) => row.id),
+  );
+  const normalizedSlots = Array.isArray(slots)
+    ? slots
+        .map((slot) => ({
+          id: typeof slot.id === "string" && slot.id ? slot.id : createId("pump-model"),
+          rowId: typeof slot.rowId === "string" ? slot.rowId : "",
+          encoderChannel: normalizeEncoderChannel(slot.encoderChannel),
+          x: Number.isFinite(Number(slot.x)) ? Number(slot.x) : 0,
+          y: Number.isFinite(Number(slot.y)) ? Number(slot.y) : 0,
+          z: Number.isFinite(Number(slot.z)) ? Number(slot.z) : 0,
+        }))
+        .filter((slot) => validPumpRowIds.has(slot.rowId))
+    : [];
+
+  return normalizedSlots.length > 0 ? normalizedSlots : createDefaultPumpModelSlots(rows);
+}
 
 function getNextRowName(rows: Row[], deviceType: DeviceType) {
   const typeIndex = rows.filter((row) => row.deviceType === deviceType).length;
@@ -193,6 +261,10 @@ function normalizeLoadedBlocks(blocks: Block[], rows: Row[]): Block[] {
       frequencyHz: normalizeFrequencyHz(block.frequencyHz ?? DEFAULT_TRIGGER_FREQUENCY_HZ),
       dutyCycle: normalizeDutyCycle(block.dutyCycle ?? DEFAULT_TRIGGER_DUTY_CYCLE),
       requireCompletePeriods: normalizeRequireCompletePeriods(block.requireCompletePeriods),
+      completePeriodTargetDurationMs:
+        block.completePeriodTargetDurationMs !== undefined
+          ? normalizeTimeValue(block.completePeriodTargetDurationMs, block.durationMs, MIN_BLOCK_DURATION_MS)
+          : undefined,
       syncSourceBlockId: block.syncSourceBlockId ?? null,
       periodMultiplier: normalizePeriodMultiplier(block.periodMultiplier),
     };
@@ -413,20 +485,35 @@ function getSortedSelectedBlockIds(blocks: Block[], blockIds: string[]) {
     .map((block) => block.id);
 }
 
+function getTimelineOrderedBlocks(blocks: Block[], rows: Row[]) {
+  const rowOrderById = new Map(rows.map((row, index) => [row.id, index]));
+
+  return [...blocks].sort(
+    (left, right) => {
+      const leftRowOrder = rowOrderById.get(left.rowId) ?? Number.MAX_SAFE_INTEGER;
+      const rightRowOrder = rowOrderById.get(right.rowId) ?? Number.MAX_SAFE_INTEGER;
+
+      return (
+        leftRowOrder - rightRowOrder ||
+        left.startMs - right.startMs ||
+        left.id.localeCompare(right.id)
+      );
+    },
+  );
+}
+
 function getSelectionForBlock({
   additive = false,
   anchorBlockId,
   blockId,
   blocks,
   currentBlockIds,
-  range = false,
 }: {
   additive?: boolean;
   anchorBlockId: string | null;
   blockId: string;
   blocks: Block[];
   currentBlockIds: string[];
-  range?: boolean;
 }) {
   const block = blocks.find((item) => item.id === blockId);
 
@@ -434,58 +521,26 @@ function getSelectionForBlock({
     return getBlockSelectionSnapshot(blocks, null);
   }
 
-  if (range && anchorBlockId) {
-    const anchorBlock = blocks.find((item) => item.id === anchorBlockId);
-
-    if (anchorBlock?.rowId === block.rowId) {
-      const rowBlocks = getSortedRowBlocks(blocks, block.rowId);
-      const anchorIndex = rowBlocks.findIndex((item) => item.id === anchorBlock.id);
-      const blockIndex = rowBlocks.findIndex((item) => item.id === block.id);
-
-      if (anchorIndex >= 0 && blockIndex >= 0) {
-        const startIndex = Math.min(anchorIndex, blockIndex);
-        const endIndex = Math.max(anchorIndex, blockIndex);
-        const selectedBlockIds = rowBlocks
-          .slice(startIndex, endIndex + 1)
-          .map((item) => item.id);
-
-        return {
-          selectedBlockId: block.id,
-          selectedBlockIds,
-          selectionAnchorBlockId: anchorBlock.id,
-          selectedRowId: block.rowId,
-          pasteTargetStartMs: getBlockEnd(block),
-        };
-      }
-    }
-  }
-
   if (additive) {
-    const currentBlocks = blocks.filter((item) => currentBlockIds.includes(item.id));
-    const canAddToCurrentSelection =
-      currentBlocks.length === 0 || currentBlocks.every((item) => item.rowId === block.rowId);
-
-    if (canAddToCurrentSelection) {
-      const currentBlockIdSet = new Set(currentBlocks.map((item) => item.id));
-      if (currentBlockIdSet.has(block.id)) {
-        currentBlockIdSet.delete(block.id);
-      } else {
-        currentBlockIdSet.add(block.id);
-      }
-
-      const selectedBlockIds = getSortedSelectedBlockIds(blocks, Array.from(currentBlockIdSet));
-      const selectedBlockId = selectedBlockIds.includes(block.id)
-        ? block.id
-        : selectedBlockIds[selectedBlockIds.length - 1] ?? null;
-
-      return {
-        selectedBlockId,
-        selectedBlockIds,
-        selectionAnchorBlockId: anchorBlockId ?? block.id,
-        selectedRowId: block.rowId,
-        pasteTargetStartMs: getBlockEnd(block),
-      };
+    const currentBlockIdSet = new Set(currentBlockIds);
+    if (currentBlockIdSet.has(block.id)) {
+      currentBlockIdSet.delete(block.id);
+    } else {
+      currentBlockIdSet.add(block.id);
     }
+
+    const selectedBlockIds = getSortedSelectedBlockIds(blocks, Array.from(currentBlockIdSet));
+    const selectedBlockId = selectedBlockIds.includes(block.id)
+      ? block.id
+      : selectedBlockIds[selectedBlockIds.length - 1] ?? null;
+
+    return {
+      selectedBlockId,
+      selectedBlockIds,
+      selectionAnchorBlockId: anchorBlockId ?? block.id,
+      selectedRowId: block.rowId,
+      pasteTargetStartMs: getBlockEnd(block),
+    };
   }
 
   return getBlockSelectionSnapshot(blocks, block.id);
@@ -506,9 +561,7 @@ function getNextSelectionAfterRemoving(blocks: Block[], blockIdsToRemove: string
 }
 
 function pasteBlocksIntoState(state: SchedulerState, blocksToPaste: Block[]) {
-  const sortedBlocksToPaste = [...blocksToPaste].sort(
-    (left, right) => left.startMs - right.startMs || left.id.localeCompare(right.id),
-  );
+  const sortedBlocksToPaste = getTimelineOrderedBlocks(blocksToPaste, state.rows);
   const firstBlock = sortedBlocksToPaste[0];
   const sourceRow = firstBlock
     ? state.rows.find((row) => row.id === firstBlock.rowId) ?? null
@@ -518,45 +571,107 @@ function pasteBlocksIntoState(state: SchedulerState, blocksToPaste: Block[]) {
     return state;
   }
 
-  const sourceRowId = firstBlock.rowId;
-  const allBlocksShareSourceRow = sortedBlocksToPaste.every(
-    (block) => block.rowId === sourceRowId,
+  const sourceRowIds = Array.from(
+    new Set(sortedBlocksToPaste.map((block) => block.rowId)),
   );
-
-  if (!allBlocksShareSourceRow) {
-    return state;
-  }
+  const allBlocksShareSourceRow = sourceRowIds.length === 1;
 
   const targetRow =
     (state.selectedRowId
       ? state.rows.find((row) => row.id === state.selectedRowId) ?? null
       : null) ?? sourceRow;
 
-  if (
-    !targetRow ||
-    targetRow.isScheduleStatus ||
-    targetRow.deviceType !== sourceRow.deviceType
-  ) {
-    return state;
+  const targetRowIdBySourceRowId = new Map<string, string>();
+
+  if (allBlocksShareSourceRow) {
+    if (
+      !targetRow ||
+      targetRow.isScheduleStatus ||
+      targetRow.deviceType !== sourceRow.deviceType
+    ) {
+      return state;
+    }
+
+    targetRowIdBySourceRowId.set(sourceRow.id, targetRow.id);
+  } else {
+    for (const sourceRowId of sourceRowIds) {
+      const row = state.rows.find((item) => item.id === sourceRowId);
+
+      if (!row || row.isScheduleStatus) {
+        return state;
+      }
+
+      targetRowIdBySourceRowId.set(sourceRowId, row.id);
+    }
   }
 
   const groupStartMs = Math.min(...sortedBlocksToPaste.map((block) => block.startMs));
   const groupEndMs = Math.max(...sortedBlocksToPaste.map((block) => getBlockEnd(block)));
   const groupDurationMs = Math.max(MIN_BLOCK_DURATION_MS, groupEndMs - groupStartMs);
   const copiedSelectionIsStillActive =
-    targetRow.id === sourceRow.id &&
     sortedBlocksToPaste.every((block) => state.selectedBlockIds.includes(block.id));
   const desiredStartMs = copiedSelectionIsStillActive
     ? groupEndMs
     : state.pasteTargetStartMs ?? groupEndMs;
   const maxStartMs = Math.max(0, state.experimentDurationMs - groupDurationMs);
-  const startMs = findAvailableStartMs({
-    blocks: state.blocks,
-    rowId: targetRow.id,
-    desiredStartMs,
-    durationMs: groupDurationMs,
-    maxStartMs,
-  });
+  const targetStartMs = clamp(desiredStartMs, 0, maxStartMs);
+  const candidateStarts = new Set<number>([targetStartMs, 0, maxStartMs]);
+  const stepMs = Math.max(1, state.gridSizeMs);
+  const maxSearchSteps = Math.ceil(maxStartMs / stepMs) + 1;
+
+  for (let step = 1; step <= maxSearchSteps; step += 1) {
+    candidateStarts.add(clamp(targetStartMs + step * stepMs, 0, maxStartMs));
+    candidateStarts.add(clamp(targetStartMs - step * stepMs, 0, maxStartMs));
+  }
+
+  for (const block of sortedBlocksToPaste) {
+    const targetRowId = targetRowIdBySourceRowId.get(block.rowId);
+    const relativeStartMs = block.startMs - groupStartMs;
+    const relativeEndMs = getBlockEnd(block) - groupStartMs;
+
+    if (!targetRowId) {
+      return state;
+    }
+
+    for (const rowBlock of state.blocks.filter((item) => item.rowId === targetRowId)) {
+      candidateStarts.add(clamp(getBlockEnd(rowBlock) - relativeStartMs, 0, maxStartMs));
+      candidateStarts.add(clamp(rowBlock.startMs - relativeEndMs, 0, maxStartMs));
+    }
+  }
+
+  const blockFitsAtStart = (startMs: number) => {
+    return sortedBlocksToPaste.every((block) => {
+      const targetRowId = targetRowIdBySourceRowId.get(block.rowId);
+
+      if (!targetRowId) {
+        return false;
+      }
+
+      const nextStartMs = startMs + (block.startMs - groupStartMs);
+      const nextEndMs = nextStartMs + Math.max(MIN_BLOCK_DURATION_MS, Math.round(block.durationMs));
+
+      if (nextStartMs < 0 || nextEndMs > state.experimentDurationMs) {
+        return false;
+      }
+
+      return state.blocks
+        .filter((rowBlock) => rowBlock.rowId === targetRowId)
+        .every(
+          (rowBlock) =>
+            nextEndMs <= rowBlock.startMs || nextStartMs >= getBlockEnd(rowBlock),
+        );
+    });
+  };
+
+  const startMs =
+    Array.from(candidateStarts)
+      .sort((left, right) => {
+        const leftDistance = Math.abs(left - targetStartMs);
+        const rightDistance = Math.abs(right - targetStartMs);
+
+        return leftDistance - rightDistance || left - right;
+      })
+      .find(blockFitsAtStart) ?? null;
 
   if (startMs === null) {
     return state;
@@ -565,7 +680,7 @@ function pasteBlocksIntoState(state: SchedulerState, blocksToPaste: Block[]) {
   const newBlocks: Block[] = sortedBlocksToPaste.map((block) => ({
     ...block,
     id: createId("block"),
-    rowId: targetRow.id,
+    rowId: targetRowIdBySourceRowId.get(block.rowId) ?? block.rowId,
     startMs: startMs + (block.startMs - groupStartMs),
     durationMs: Math.max(MIN_BLOCK_DURATION_MS, Math.round(block.durationMs)),
   }));
@@ -586,7 +701,7 @@ function pasteBlocksIntoState(state: SchedulerState, blocksToPaste: Block[]) {
     selectedBlockId: newBlocks[0]?.id ?? null,
     selectedBlockIds: newBlocks.map((block) => block.id),
     selectionAnchorBlockId: newBlocks[0]?.id ?? null,
-    selectedRowId: targetRow.id,
+    selectedRowId: newBlocks[0]?.rowId ?? state.selectedRowId,
     pasteTargetStartMs: Math.max(...newBlocks.map((block) => getBlockEnd(block))),
     experimentDurationMs: nextExperimentDurationMs,
     ...getPlayheadSnapshot(state, nextExperimentDurationMs, nowMs),
@@ -817,6 +932,7 @@ function getHistorySnapshot(state: SchedulerState): SchedulerHistorySnapshot {
   return {
     rows: state.rows.map((row) => ({ ...row })),
     blocks: state.blocks.map((block) => ({ ...block })),
+    pumpModelSlots: state.pumpModelSlots.map((slot) => ({ ...slot })),
     selectedBlockId: state.selectedBlockId,
     selectedBlockIds: [...state.selectedBlockIds],
     selectionAnchorBlockId: state.selectionAnchorBlockId,
@@ -834,6 +950,7 @@ function restoreHistorySnapshot(
   SchedulerState,
   | "rows"
   | "blocks"
+  | "pumpModelSlots"
   | "selectedBlockId"
   | "selectedBlockIds"
   | "selectionAnchorBlockId"
@@ -846,6 +963,7 @@ function restoreHistorySnapshot(
   return {
     rows: snapshot.rows.map((row) => ({ ...row })),
     blocks: snapshot.blocks.map((block) => ({ ...block })),
+    pumpModelSlots: snapshot.pumpModelSlots.map((slot) => ({ ...slot })),
     selectedBlockId: snapshot.selectedBlockId,
     selectedBlockIds: [...snapshot.selectedBlockIds],
     selectionAnchorBlockId: snapshot.selectionAnchorBlockId,
@@ -889,16 +1007,19 @@ const initialExperimentDurationMs = getScheduleDuration(
 export const useSchedulerStore = create<SchedulerState>((set) => ({
   rows: initialRows,
   blocks: initialBlocks,
+  pumpModelSlots: normalizePumpModelSlots(initialPumpModelSlots, initialRows),
   syncSourcePickTargetBlockId: null,
   availablePumpHardwareIds: [],
   past: [],
   future: [],
   pendingHistorySnapshot: null,
-  selectedBlockId: initialBlocks[0]?.id ?? null,
-  selectedBlockIds: initialBlocks[0] ? [initialBlocks[0].id] : [],
-  selectionAnchorBlockId: initialBlocks[0]?.id ?? null,
-  selectedRowId: initialBlocks[0]?.rowId ?? initialRows[0]?.id ?? null,
-  pasteTargetStartMs: initialBlocks[0] ? getBlockEnd(initialBlocks[0]) : null,
+  selectedBlockId: null,
+  selectedBlockIds: [],
+  selectionAnchorBlockId: null,
+  modelHighlightedRowId: null,
+  scheduleLoadNonce: 0,
+  selectedRowId: initialRows[0]?.id ?? null,
+  pasteTargetStartMs: null,
   gridSizeMs: 500,
   zoomPxPerMinute: DEFAULT_ZOOM_PX_PER_MINUTE,
   experimentDurationMs: initialExperimentDurationMs,
@@ -916,7 +1037,6 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
               blockId,
               blocks: state.blocks,
               currentBlockIds: state.selectedBlockIds,
-              range: options.range,
             }),
             syncSourcePickTargetBlockId: null,
           }
@@ -929,6 +1049,8 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
     ),
   setSyncSourcePickTargetBlock: (syncSourcePickTargetBlockId) =>
     set({ syncSourcePickTargetBlockId }),
+  setModelHighlightedRow: (modelHighlightedRowId) =>
+    set({ modelHighlightedRowId }),
   setPasteTarget: (selectedRowId, startMs = null) =>
     set({
       selectedRowId,
@@ -1112,12 +1234,15 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
         nextBlocks,
         schedule.experimentDurationMs,
       );
-
-      const selectedBlock = nextBlocks[0] ?? null;
+      const nextPumpModelSlots = normalizePumpModelSlots(
+        schedule.pumpModelSlots,
+        nextRows,
+      );
 
       return withHistory(state, {
         rows: nextRows,
         blocks: nextBlocks,
+        pumpModelSlots: nextPumpModelSlots,
         gridSizeMs: Math.max(
           FIRMWARE_SCHEDULE_LIMITS.minEventSpacingMs,
           Math.round(schedule.gridSizeMs),
@@ -1128,17 +1253,57 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
           MAX_ZOOM_PX_PER_MINUTE,
         ),
         experimentDurationMs: nextExperimentDurationMs,
-        selectedBlockId: selectedBlock?.id ?? null,
-        selectedBlockIds: selectedBlock ? [selectedBlock.id] : [],
-        selectionAnchorBlockId: selectedBlock?.id ?? null,
-        selectedRowId: selectedBlock?.rowId ?? schedule.rows[0]?.id ?? null,
-        pasteTargetStartMs: selectedBlock ? getBlockEnd(selectedBlock) : null,
+        selectedBlockId: null,
+        selectedBlockIds: [],
+        selectionAnchorBlockId: null,
+        selectedRowId: nextRows[0]?.id ?? null,
+        scheduleLoadNonce: state.scheduleLoadNonce + 1,
+        pasteTargetStartMs: null,
         experimentState: "idle",
         playheadMs: 0,
         playheadStartOffsetMs: 0,
         playheadStartTimestamp: null,
         availablePumpHardwareIds: state.availablePumpHardwareIds,
       });
+    }),
+  setPumpModelSlots: (pumpModelSlots) =>
+    set((state) =>
+      withHistory(state, {
+        pumpModelSlots: normalizePumpModelSlots(pumpModelSlots, state.rows),
+      }),
+    ),
+  addPumpModelSlot: (pumpModelSlot) =>
+    set((state) => {
+      const nextPumpModelSlots = normalizePumpModelSlots(
+        [...state.pumpModelSlots, pumpModelSlot],
+        state.rows,
+      );
+
+      return withHistory(state, { pumpModelSlots: nextPumpModelSlots });
+    }),
+  updatePumpModelSlot: (slotId, patch) =>
+    set((state) => {
+      const nextPumpModelSlots = normalizePumpModelSlots(
+        state.pumpModelSlots.map((slot) =>
+          slot.id === slotId ? { ...slot, ...patch } : slot,
+        ),
+        state.rows,
+      );
+
+      return withHistory(state, { pumpModelSlots: nextPumpModelSlots });
+    }),
+  deletePumpModelSlot: (slotId) =>
+    set((state) => {
+      if (state.pumpModelSlots.length <= 1) {
+        return state;
+      }
+
+      const nextPumpModelSlots = normalizePumpModelSlots(
+        state.pumpModelSlots.filter((slot) => slot.id !== slotId),
+        state.rows,
+      );
+
+      return withHistory(state, { pumpModelSlots: nextPumpModelSlots });
     }),
   addRow: (deviceType = "peristaltic") =>
     set((state) => {
@@ -1205,11 +1370,16 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
         remainingBlocks,
         state.experimentDurationMs,
       );
+      const nextPumpModelSlots = normalizePumpModelSlots(
+        state.pumpModelSlots.filter((slot) => slot.rowId !== rowId),
+        remainingRows,
+      );
       const nowMs = Date.now();
 
       return withHistory(state, {
         rows: remainingRows,
         blocks: remainingBlocks,
+        pumpModelSlots: nextPumpModelSlots,
         ...fallbackSelection,
         experimentDurationMs: nextExperimentDurationMs,
         ...getPlayheadSnapshot(state, nextExperimentDurationMs, nowMs),
@@ -1345,11 +1515,16 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
         nextBlocks,
         state.experimentDurationMs,
       );
+      const nextPumpModelSlots = normalizePumpModelSlots(
+        state.pumpModelSlots,
+        nextRows,
+      );
       const nowMs = Date.now();
 
       return withHistory(state, {
         rows: nextRows,
         blocks: nextBlocks,
+        pumpModelSlots: nextPumpModelSlots,
         selectedBlockId: selectedBlock?.id ?? null,
         selectedBlockIds:
           selectedBlockIds.length > 0
@@ -1429,7 +1604,7 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
     }),
   updateBlock: (blockId, patch, options = {}) =>
     set((state) => {
-      const nextBlocks = state.blocks.map((block) => {
+      let nextBlocks = state.blocks.map((block) => {
         if (block.id !== blockId) {
           return block;
         }
@@ -1520,17 +1695,27 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
         const nextPeriodMultiplier = isTriggerBlock
           ? normalizePeriodMultiplier(patch.periodMultiplier ?? block.periodMultiplier)
           : block.periodMultiplier;
+        let nextCompletePeriodTargetDurationMs = block.completePeriodTargetDurationMs;
 
         if (
           isTriggerBlock &&
           nextTriggerMode === "waveform" &&
           nextRequireCompletePeriods
         ) {
+          nextCompletePeriodTargetDurationMs = durationChanged
+            ? Math.max(MIN_BLOCK_DURATION_MS, requestedDurationMs)
+            : normalizeTimeValue(
+                block.completePeriodTargetDurationMs,
+                block.durationMs,
+                MIN_BLOCK_DURATION_MS,
+              );
           nextDurationMs = getCompletePeriodDurationMs(
-            nextDurationMs,
+            nextCompletePeriodTargetDurationMs,
             nextFrequencyHz ?? 1,
             nextStartMs,
           );
+        } else if (isTriggerBlock && nextTriggerMode !== "sync-division") {
+          nextCompletePeriodTargetDurationMs = undefined;
         }
 
         if (
@@ -1561,12 +1746,21 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
               : null;
 
           if (derivedFrequencyHz !== null) {
+            nextCompletePeriodTargetDurationMs = durationChanged
+              ? Math.max(MIN_BLOCK_DURATION_MS, requestedDurationMs)
+              : normalizeTimeValue(
+                  block.completePeriodTargetDurationMs,
+                  block.durationMs,
+                  MIN_BLOCK_DURATION_MS,
+                );
             nextDurationMs = getCompletePeriodDurationMs(
-              nextDurationMs,
+              nextCompletePeriodTargetDurationMs,
               derivedFrequencyHz,
               nextStartMs,
             );
           }
+        } else if (!isTriggerBlock) {
+          nextCompletePeriodTargetDurationMs = undefined;
         }
 
         return {
@@ -1583,6 +1777,7 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
           frequencyHz: nextFrequencyHz,
           dutyCycle: nextDutyCycle,
           requireCompletePeriods: nextRequireCompletePeriods,
+          completePeriodTargetDurationMs: nextCompletePeriodTargetDurationMs,
           syncSourceBlockId: isTriggerBlock
             ? patch.syncSourceBlockId !== undefined
               ? patch.syncSourceBlockId
@@ -1591,6 +1786,47 @@ export const useSchedulerStore = create<SchedulerState>((set) => ({
           periodMultiplier: nextPeriodMultiplier,
         };
       });
+
+      nextBlocks = nextBlocks.map((block) => {
+        const row = state.rows.find((item) => item.id === block.rowId);
+        if (row?.deviceType !== "trigger" || block.triggerMode !== "sync-division") {
+          return block;
+        }
+
+        const sourceBlock = block.syncSourceBlockId
+          ? nextBlocks.find((item) => item.id === block.syncSourceBlockId) ?? null
+          : null;
+        const derivedFrequencyHz =
+          sourceBlock?.triggerMode === "waveform"
+            ? getDerivedFrequencyHz(
+                normalizeFrequencyHz(
+                  sourceBlock.frequencyHz ?? DEFAULT_TRIGGER_FREQUENCY_HZ,
+                ),
+                block.periodMultiplier,
+              )
+            : null;
+
+        if (derivedFrequencyHz === null) {
+          return block;
+        }
+
+        const targetDurationMs = normalizeTimeValue(
+          block.completePeriodTargetDurationMs,
+          block.durationMs,
+          MIN_BLOCK_DURATION_MS,
+        );
+
+        return {
+          ...block,
+          completePeriodTargetDurationMs: targetDurationMs,
+          durationMs: getCompletePeriodDurationMs(
+            targetDurationMs,
+            derivedFrequencyHz,
+            block.startMs,
+          ),
+        };
+      });
+
       const nextExperimentDurationMs = getScheduleDuration(
         nextBlocks,
         state.experimentDurationMs,

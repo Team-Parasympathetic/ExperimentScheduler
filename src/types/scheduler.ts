@@ -14,6 +14,15 @@ export interface Row {
   isScheduleStatus?: boolean;
 }
 
+export interface PumpModelSlot {
+  id: string;
+  rowId: string;
+  encoderChannel: number;
+  x: number;
+  y: number;
+  z: number;
+}
+
 export interface Block {
   id: string;
   rowId: string;
@@ -25,6 +34,7 @@ export interface Block {
   frequencyHz?: number;
   dutyCycle?: number;
   requireCompletePeriods?: boolean;
+  completePeriodTargetDurationMs?: number;
   syncSourceBlockId?: string | null;
   periodMultiplier?: number;
 }
